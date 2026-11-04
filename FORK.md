@@ -41,3 +41,15 @@ Upstream files touched, one `apprise.emit()` each: `api/comments.ts`, `api/feedb
 `api/approvals.ts` (submit, approve, decline), `models/users.ts` (`createUser`). Plus registrations
 in `models/index.ts` and `api/index.ts`, strings in `backend/locales/en.json`, the card in
 `frontend/src/pages/AdminNotifications.vue`, and `apprise` in the Dockerfile's package list.
+
+## Docker image
+
+`.github/workflows/fork-image.yml` builds `dev/build/Dockerfile` and publishes it to
+`ghcr.io/serversathome-personal/wikijs3-custom` on every push to `main` (tags `latest`, `main` and
+`sha-<commit>`) and on a `v*` tag (`3.1.0`, `3.1`, …). linux/amd64 by default; run the workflow by
+hand with **arm64** ticked for a multi-arch image. Upstream's own `build.yml` is left as it is: it
+only runs on upstream's branch or by hand, and publishes to upstream's registries.
+
+`dev/fork/docker-compose.yml` is a ready-to-run deployment (PostgreSQL 17 + the wiki, with an
+optional Apprise API server). The first administrator is created on the first start from `ADMIN_EMAIL` / `ADMIN_PASS` (upstream's
+defaults are `admin@example.com` / `12345678` when they are left out).

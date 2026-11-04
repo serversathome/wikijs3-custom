@@ -1,0 +1,46 @@
+# FORK: a home-lab deployment of ghcr.io/serversathome-personal/wikijs3-custom -- see FORK.md.
+# Change the passwords, then: docker compose up -d
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: wiki
+      POSTGRES_USER: wikijs
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - ./db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wikijs -d wiki']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  wiki:
+    image: ghcr.io/serversathome-personal/wikijs3-custom:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: wikijs
+      DB_PASS: change-me
+      DB_NAME: wiki
+      DB_SSL: 'false'
+      # The first administrator, created on the first start only
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASS: change-me-too
+    volumes:
+      - ./data:/wiki/data
+    ports:
+      - '3000:3000'
+
+  # Optional: an Apprise API server, for Admin -> Notifications -> Apprise in "Apprise API server"
+  # mode with http://apprise:8000. Not needed for the default mode: the image has the apprise command.
+  # apprise:
+  #   image: caronc/apprise:latest
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./apprise:/config
