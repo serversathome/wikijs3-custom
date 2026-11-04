@@ -45,7 +45,7 @@ in `models/index.ts` and `api/index.ts`, strings in `backend/locales/en.json`, t
 ## Docker image
 
 `.github/workflows/fork-image.yml` builds `dev/build/Dockerfile` and publishes it to
-`ghcr.io/serversathome-personal/wikijs3-custom` on every push to `main` (tags `latest`, `main` and
+`ghcr.io/serversathome/wikijs3-custom` on every push to `main` (tags `latest`, `main` and
 `sha-<commit>`) and on a `v*` tag (`3.1.0`, `3.1`, …). linux/amd64 by default; run the workflow by
 hand with **arm64** ticked for a multi-arch image. Upstream's own `build.yml` is left as it is: it
 only runs on upstream's branch or by hand, and publishes to upstream's registries.

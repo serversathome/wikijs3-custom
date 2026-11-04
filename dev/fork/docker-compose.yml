@@ -1,4 +1,4 @@
-# FORK: a home-lab deployment of ghcr.io/serversathome-personal/wikijs3-custom -- see FORK.md.
+# FORK: a home-lab deployment of ghcr.io/serversathome/wikijs3-custom -- see FORK.md.
 # Change the passwords, then: docker compose up -d
 services:
   db:
@@ -17,7 +17,7 @@ services:
       retries: 5
 
   wiki:
-    image: ghcr.io/serversathome-personal/wikijs3-custom:latest
+    image: ghcr.io/serversathome/wikijs3-custom:latest
     restart: unless-stopped
     depends_on:
       db:
