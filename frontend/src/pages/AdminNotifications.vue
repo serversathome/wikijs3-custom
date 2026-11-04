@@ -228,13 +228,15 @@
             </w-item>
           </template>
         </w-card>
+        <!-- FORK: Apprise announcements — see FORK.md -->
+        <admin-notifications-apprise ref="appriseCard" class="mt-4" />
       </div>
     </div>
   </w-page>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive } from 'vue'
+import { computed, onMounted, reactive, useTemplateRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { loading } from '@/composables/loading'
@@ -244,6 +246,8 @@ import { apiErrorMessage } from '@/helpers/apiError'
 import { relativeDate } from '@/helpers/datetime'
 
 import { useSiteStore } from '@/stores/site'
+
+import AdminNotificationsApprise from '@/components/AdminNotificationsApprise.vue'
 
 /**
  * Admin → Notifications: the instance-wide settings of the notification system, and how delivery is
@@ -295,6 +299,9 @@ const state = reactive({
   }
 })
 
+// FORK: the Apprise card, loaded and saved with the rest of the page
+const appriseCard = useTemplateRef('appriseCard')
+
 // COMPUTED
 
 const deliveryModes = computed(() => [
@@ -312,6 +319,7 @@ async function load() {
     const resp = await API_CLIENT.get('system/notifications').json()
     state.config = { ...state.config, ...resp.settings }
     state.status = { ...state.status, ...resp.status }
+    await appriseCard.value?.load()
   } catch (err) {
     notify({
       type: 'negative',
@@ -342,6 +350,7 @@ async function save() {
         sections: { ...state.config.sections }
       }
     })
+    await appriseCard.value?.save()
     notify({
       type: 'positive',
       message: t('admin.notifications.saveSuccess')

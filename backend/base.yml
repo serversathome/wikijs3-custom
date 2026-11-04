@@ -118,6 +118,25 @@ defaults:
         discussions: 'email'
         reviews: 'email'
         everything: 'email'
+    # FORK: Apprise announcements (Admin -> Notifications), not part of upstream Wiki.js -- see FORK.md.
+    # Tells one administrator-chosen destination (Discord, Slack, Telegram, ntfy, email...) what
+    # happens on the wiki. `cli` runs the `apprise` command with `urls`; `api` posts to an Apprise
+    # API server at `apiUrl`, using the configuration stored there under `apiKey` or, with no key,
+    # the `urls` given here.
+    apprise:
+      isEnabled: false
+      mode: 'cli'
+      urls: ''
+      apiUrl: ''
+      apiKey: ''
+      # Which events are announced. A map rather than a list: the stored settings are merged over
+      # these defaults key by key, and a list would be merged index by index.
+      events:
+        'comment:new': true
+        'submission:new': true
+        'submission:approved': true
+        'submission:rejected': true
+        'user:join': true
     scim:
       # SCIM 2.0 provisioning, served at /_scim/v2. Off by default: it is a directory's write access
       # to the wiki's user and group lists, and nothing about it is useful until an administrator has

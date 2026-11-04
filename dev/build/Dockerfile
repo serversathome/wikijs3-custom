@@ -1,7 +1,9 @@
 FROM node:26
 LABEL maintainer="requarks.io"
 
+# FORK: `apprise` is the command Admin -> Notifications -> Apprise runs in its default mode -- see FORK.md
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -qy --no-install-recommends \
+    apprise \
     bash \
     build-essential \
     curl \

@@ -40,6 +40,7 @@ async function routes(app: FastifyInstance) {
   app.register(import('./analytics.ts'))
   app.register(import('./apiKeys.ts'), { prefix: '/api-keys' })
   app.register(import('./approvals.ts'))
+  app.register(import('./apprise.ts'))
   app.register(import('./assets.ts'))
   app.register(import('./auditLog.ts'), { prefix: '/audit' })
   app.register(import('./authentication.ts'))

@@ -728,6 +728,14 @@ class Users {
         email: email.toLowerCase()
       }
     })
+    // FORK: Apprise announcement — see FORK.md. Not for the sample content's placeholder authors,
+    //       which nobody registered and nobody can sign in as.
+    if (!email.toLowerCase().endsWith(`@${SAMPLE_ACCOUNT_DOMAIN}`)) {
+      await WIKI.models.apprise.emit('user:join', {
+        userName: name,
+        userEmail: email.toLowerCase()
+      })
+    }
 
     return userId
   }

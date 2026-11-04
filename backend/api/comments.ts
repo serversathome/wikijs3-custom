@@ -616,6 +616,14 @@ async function routes(app: FastifyInstance) {
           ...(comment.authorId ? {} : { actorName: comment.authorName })
         }
       })
+      // FORK: Apprise announcement — see FORK.md
+      await WIKI.models.apprise.emit('comment:new', {
+        siteId: req.params.siteId,
+        pageId: page.id,
+        pageTitle: page.title,
+        pagePath: page.path,
+        actorName: comment.authorName
+      })
 
       reply.code(201)
       return comment

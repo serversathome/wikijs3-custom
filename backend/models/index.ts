@@ -1,6 +1,7 @@
 import { analytics } from './analytics.ts'
 import { apiKeys } from './apiKeys.ts'
 import { approvals } from './approvals.ts'
+import { apprise } from './apprise.ts'
 import { assets } from './assets.ts'
 import { auditLog } from './auditLog.ts'
 import { authentication } from './authentication.ts'
@@ -53,6 +54,7 @@ export default {
   analytics,
   apiKeys,
   approvals,
+  apprise,
   assets,
   auditLog,
   authentication,

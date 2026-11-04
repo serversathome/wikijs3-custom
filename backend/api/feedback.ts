@@ -879,6 +879,14 @@ async function routes(app: FastifyInstance) {
           },
           content: result.comment.content
         })
+        // FORK: Apprise announcement — see FORK.md
+        await WIKI.models.apprise.emit('comment:new', {
+          siteId: req.params.siteId,
+          pageId: page.id,
+          pageTitle: page.title,
+          pagePath: page.path,
+          actorName: result.comment.authorName
+        })
       }
       /*
         One event for the change and its comment together, not a `comment:new` beside it: the fan-out

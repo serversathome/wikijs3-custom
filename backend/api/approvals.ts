@@ -1,5 +1,6 @@
 import { audit } from '../helpers/audit.ts'
 import { CustomError } from '../helpers/common.ts'
+import { requestUser } from '../helpers/requester.ts'
 import { actorFrom, mayBypassPassword, mayOnPage, unlockedFor, unpublishedFor } from './pages.ts'
 import type { ApprovalPageRef, ApprovalRulePatch, ReviewerScope } from '../models/approvals.ts'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
@@ -592,6 +593,15 @@ async function routes(app: FastifyInstance) {
         submittedBy: submission.author.name,
         submittedByGuest: submission.author.isGuest
       })
+      // FORK: Apprise announcement — see FORK.md
+      await WIKI.models.apprise.emit('submission:approved', {
+        siteId: req.params.siteId,
+        pageId: submission.page.id,
+        pageTitle: submission.page.title,
+        pagePath: submission.page.path,
+        actorName: requestUser(req)?.name,
+        submitterName: submission.author.name
+      })
 
       return {
         ok: true,
@@ -652,6 +662,15 @@ async function routes(app: FastifyInstance) {
         path: submission.page.path,
         submittedBy: submission.author.name,
         submittedByGuest: submission.author.isGuest
+      })
+      // FORK: Apprise announcement — see FORK.md
+      await WIKI.models.apprise.emit('submission:rejected', {
+        siteId: req.params.siteId,
+        pageId: submission.page.id,
+        pageTitle: submission.page.title,
+        pagePath: submission.page.path,
+        actorName: requestUser(req)?.name,
+        submitterName: submission.author.name
       })
 
       return {
@@ -954,6 +973,16 @@ async function routes(app: FastifyInstance) {
           // -> A guest has no account to look a name up from, only what they typed
           ...(actor ? {} : { actorName: guestName })
         }
+      })
+      // FORK: Apprise announcement — see FORK.md
+      await WIKI.models.apprise.emit('submission:new', {
+        siteId: req.params.siteId,
+        pageId: page.id,
+        pageTitle: page.title,
+        pagePath: page.path,
+        submissionId: submission.id,
+        isUpdate: Boolean(previous),
+        actorName: actor ? requestUser(req)?.name : guestName
       })
 
       return {

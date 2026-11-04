@@ -70,7 +70,8 @@ before working in an area — and add to it there, not here:
   `live-notes`, `audit-log`, `notifications`, `mcp`, `page-lifecycle`, `glossary`,
   `feedback-boards`, `metrics`, `icons`, `page-paths` (path segments, the ltree encoding),
   `personal-access-tokens` (`config.scope`, `requestUser(req)`) and `image-editor` (the file
-  manager's image editor and resize).
+  manager's image editor and resize). **Fork:** `apprise` (Admin → Notifications → Apprise); every fork
+  change is listed in `FORK.md`.
 - **Procedures** — `.claude/skills/`: `throwaway-instance` boots, scripts and tears down a
   disposable instance.
 
