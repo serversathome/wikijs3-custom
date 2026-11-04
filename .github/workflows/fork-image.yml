@@ -1,4 +1,4 @@
-# FORK: builds this fork's image and publishes it to ghcr.io -- see FORK.md.
+# FORK: builds this fork's image, publishes it to ghcr.io and cuts a GitHub release -- see FORK.md.
 #
 # Upstream's build.yml is left untouched (it only runs on upstream's own branch, or by hand) so that
 # merging a new upstream release never conflicts here.
@@ -8,8 +8,15 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
+    # -> Changes that cannot alter the image publish nothing
+    paths-ignore:
+      - '**.md'
+      - '.claude/**'
+      - '.devcontainer/**'
+      - '.vscode/**'
+      - 'dev/chart/**'
+      - 'dev/helm/**'
+      - 'dev/packer/**'
   workflow_dispatch:
     inputs:
       arm64:
@@ -26,7 +33,7 @@ jobs:
     name: Build + Publish
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -45,14 +52,24 @@ jobs:
 
       - name: Set Version
         run: |
-          # -> The upstream release this is built on, plus the commit, e.g. 3.0.2-fork.g836b86b
+          # -> The upstream release this is built on plus a running number, e.g. 3.0.2-fork.4.
+          #    The number restarts at 1 when an upstream release is merged in.
           UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match '3.*' --exclude '*-*')
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            REL_VERSION="${GITHUB_REF_NAME#v}"
-          else
+          if [[ "$GITHUB_REF" != refs/heads/main ]]; then
             REL_VERSION="${UPSTREAM_TAG}-fork.g${GITHUB_SHA::7}"
+            PREV_TAG=""
+          elif EXISTING=$(git tag --points-at HEAD --list 'v*-fork.*' | sort -V | tail -n1) && [[ -n "$EXISTING" ]]; then
+            # -> A rerun of an already released commit (e.g. by hand for arm64) keeps its version
+            REL_VERSION="${EXISTING#v}"
+            PREV_TAG=""
+          else
+            LAST=$(git tag --list "v${UPSTREAM_TAG}-fork.*" | sed "s/^v${UPSTREAM_TAG}-fork\.//" | sort -n | tail -n1)
+            REL_VERSION="${UPSTREAM_TAG}-fork.$(( ${LAST:-0} + 1 ))"
+            PREV_TAG=$(git tag --list 'v*-fork.*' --sort=-v:refname | head -n1)
+            PREV_TAG="${PREV_TAG:-$UPSTREAM_TAG}"
           fi
           echo "REL_VERSION=${REL_VERSION}" >> $GITHUB_ENV
+          echo "PREV_TAG=${PREV_TAG}" >> $GITHUB_ENV
           yq -iP '.version = strenv(REL_VERSION)' backend/package.json -o json
           yq -iP '.version = strenv(REL_VERSION)' frontend/package.json -o json
 
@@ -77,10 +94,9 @@ jobs:
             latest=false
           tags: |
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ env.REL_VERSION }},enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=branch
             type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
           labels: |
             org.opencontainers.image.title=Wiki.js (wikijs3-custom)
             org.opencontainers.image.description=Wiki.js 3 with Apprise notifications
@@ -111,3 +127,30 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        # -> Only once the image is pushed, and only for a commit not released yet. The tag is made by
+        #    GITHUB_TOKEN, so it does not start this workflow again.
+        if: github.ref == 'refs/heads/main' && env.PREV_TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY}"
+          {
+            echo '```bash'
+            echo "docker pull ${IMAGE}:${REL_VERSION}"
+            echo '```'
+            echo
+            echo "Also published as \`${IMAGE}:latest\`."
+            echo
+            echo "## Changes since ${PREV_TAG}"
+            echo
+            # -> --first-parent: a merged upstream release reads as one line, not its whole history
+            git log --first-parent --no-merges --pretty='- %s (%h)' "${PREV_TAG}..HEAD"
+            git log --first-parent --merges --pretty='- %s (%h)' "${PREV_TAG}..HEAD"
+          } > release-notes.md
+          gh release create "v${REL_VERSION}" \
+            --target "$GITHUB_SHA" \
+            --title "v${REL_VERSION}" \
+            --notes-file release-notes.md \
+            --latest

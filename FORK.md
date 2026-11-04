@@ -45,10 +45,17 @@ in `models/index.ts` and `api/index.ts`, strings in `backend/locales/en.json`, t
 ## Docker image
 
 `.github/workflows/fork-image.yml` builds `dev/build/Dockerfile` and publishes it to
-`ghcr.io/serversathome/wikijs3-custom` on every push to `main` (tags `latest`, `main` and
-`sha-<commit>`) and on a `v*` tag (`3.1.0`, `3.1`, …). linux/amd64 by default; run the workflow by
-hand with **arm64** ticked for a multi-arch image. Upstream's own `build.yml` is left as it is: it
-only runs on upstream's branch or by hand, and publishes to upstream's registries.
+`ghcr.io/serversathome/wikijs3-custom` on every push to `main`, then cuts a GitHub release for it —
+nothing is tagged or released by hand. Pushes touching only documentation (`*.md`, `.claude/`, the
+dev container, the charts) publish nothing.
+
+The version is the upstream release the fork is built on plus a running number: `3.0.2-fork.1`,
+`3.0.2-fork.2`, …, restarting at `.1` once a newer upstream release is merged in. Each build is
+tagged `latest`, `main`, `sha-<commit>` and its version; the release is `v<version>`, with the pull
+command and the commits since the previous release as its notes. linux/amd64 by default; run the
+workflow by hand on `main` with **arm64** ticked to rebuild the current release multi-arch (it keeps
+its version and makes no new release). Upstream's own `build.yml` is left as it is: it only runs on
+upstream's branch or by hand, and publishes to upstream's registries.
 
 `dev/fork/docker-compose.yml` is a ready-to-run deployment (PostgreSQL 17 + the wiki, with an
 optional Apprise API server). The first administrator is created on the first start from `ADMIN_EMAIL` / `ADMIN_PASS` (upstream's
