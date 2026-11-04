@@ -39,10 +39,14 @@ jobs:
         with:
           node-version: 26.x
 
+      - name: Fetch upstream release tags
+        # -> What the version is described from: this repo carries upstream's history but not its tags
+        run: git fetch --no-tags https://github.com/requarks/wiki.git 'refs/tags/3.*:refs/tags/3.*'
+
       - name: Set Version
         run: |
           # -> The upstream release this is built on, plus the commit, e.g. 3.0.2-fork.g836b86b
-          UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match '[0-9]*' 2>/dev/null || echo 3.0.0)
+          UPSTREAM_TAG=$(git describe --tags --abbrev=0 --match '3.*' --exclude '*-*')
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             REL_VERSION="${GITHUB_REF_NAME#v}"
           else
@@ -72,7 +76,7 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=branch
             type=sha,prefix=sha-
             type=semver,pattern={{version}}
