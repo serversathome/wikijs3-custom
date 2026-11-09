@@ -1,6 +1,7 @@
 import { LitElement, html, css } from 'lit'
 import { deflateRaw } from 'pako'
 import { DarkMode } from '../shared/theme.js'
+import { webUrl } from '../shared/urls.js'
 
 /**
  * The draw.io that answers when the block names no server.
@@ -34,6 +35,20 @@ function compressForUrl(xml) {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK_SIZE))
   }
   return btoa(binary)
+}
+
+/**
+ * An attribute that means "off" when it says so.
+ *
+ * MDC writes every prop with a value — `static="false"` is what the block picker produces for a
+ * toggle that was switched on and off again — and Lit's own Boolean converter reads any string at all
+ * as true, that one included.
+ */
+const boolean = {
+  converter: {
+    fromAttribute: (value) => value !== null && value !== 'false',
+    toAttribute: (value) => (value ? 'true' : null)
+  }
 }
 
 /**
@@ -79,6 +94,7 @@ export class BlockDrawioElement extends LitElement {
       {
         name: 'server',
         type: 'string',
+        url: true,
         label: 'Server',
         hint: 'A self-hosted draw.io to draw and display with. The public diagrams.net services when left empty.'
       },
@@ -101,6 +117,14 @@ export class BlockDrawioElement extends LitElement {
         label: 'Alignment',
         options: ['left', 'center'],
         default: 'left'
+      },
+      {
+        name: 'static',
+        type: 'boolean',
+        label: 'Static',
+        hint: 'Show the diagram as a still picture: no toolbar, zoom, tooltips or clickable links.',
+        // -> Stated, so that a toggle switched on and then off again writes nothing into the page
+        default: false
       }
     ]
   }
@@ -151,6 +175,13 @@ export class BlockDrawioElement extends LitElement {
         height: 100%;
         border: 0;
       }
+      /*
+        A static diagram takes no pointer at all, so hovering shows no tooltip or highlight, a link
+        in the drawing cannot be followed, and the wheel scrolls the page rather than zooming.
+      */
+      .frame.is-static iframe {
+        pointer-events: none;
+      }
 
       .caption {
         font-size: 0.8em;
@@ -177,6 +208,8 @@ export class BlockDrawioElement extends LitElement {
       caption: { type: String },
       /** `left` or `center`. */
       align: { type: String },
+      /** No toolbar and no pointer: the drawing as a picture. */
+      static: boolean,
 
       _source: { state: true }
     }
@@ -188,6 +221,7 @@ export class BlockDrawioElement extends LitElement {
     this.height = 420
     this.caption = ''
     this.align = 'left'
+    this.static = false
     this._source = ''
     /*
       The lightbox reads its theme from the URL at load, so the frame is rebuilt when the reader
@@ -218,15 +252,42 @@ export class BlockDrawioElement extends LitElement {
    * `lightbox=1` is draw.io's read-only viewer: no editing, no menus, just the drawing with zoom and
    * a layers control. `edit=_blank` is deliberately absent — the pencil it adds opens the diagram in
    * a copy of draw.io that has nowhere to save to, and the way to change a drawing here is the page.
+   *
+   * A static diagram drops `nav=1` (folding a container is an interaction) and adds `toolbar=0`, which
+   * keeps draw.io from building the zoom toolbar at all. Only taking the pointer away, in the styles,
+   * would leave that toolbar still reachable from the keyboard.
    */
   _url() {
-    const server = (this.server || '').trim().replace(/\/+$/, '') || PUBLIC_VIEWER
+    const server = this._server()
+    if (!server) {
+      return null
+    }
     const params = new URLSearchParams({
       lightbox: '1',
-      nav: '1',
+      ...(this.static ? { toolbar: '0' } : { nav: '1' }),
       ui: this._darkMode.isDark ? 'dark' : 'kennedy'
     })
     return `${server}/?${params.toString()}#R${encodeURIComponent(compressForUrl(this._source))}`
+  }
+
+  /**
+   * The draw.io to load, without a trailing slash -- or null for a `server` no frame may be given.
+   *
+   * The prop is the page author's, and it becomes the frame's `src`. So it has to be an `http:` or
+   * `https:` address (a `javascript:` one is script, run as the reader), and one on ANOTHER host: a
+   * frame showing this wiki's own origin runs whatever is at that address with the reader's session,
+   * an uploaded file included. A self-hosted draw.io is a deployment of its own, on a host of its own.
+   */
+  _server() {
+    if (!(this.server || '').trim()) {
+      return PUBLIC_VIEWER
+    }
+    const url = webUrl(this.server)
+    if (!url || url.origin === window.location.origin) {
+      return null
+    }
+    // -> The query and fragment are draw.io's to set, below
+    return `${url.origin}${url.pathname}`.replace(/\/+$/, '')
   }
 
   render() {
@@ -237,12 +298,22 @@ export class BlockDrawioElement extends LitElement {
         </div>
       `
     }
+    const url = this._url()
+    if (!url) {
+      return html`
+        <div class="error">
+          ${this.server} is not a draw.io server this diagram can be shown from. It has to be an
+          http or https address on a host other than this wiki.
+        </div>
+      `
+    }
     const height = Number(this.height) > 0 ? Number(this.height) : 420
     return html`
       <div class="diagram ${this.align === 'center' ? 'is-center' : ''}">
-        <div class="frame" style="height: ${height}px">
+        <div class="frame ${this.static ? 'is-static' : ''}" style="height: ${height}px">
           <iframe
-            src=${this._url()}
+            src=${url}
+            tabindex=${this.static ? '-1' : '0'}
             title=${this.caption || 'Diagram'}
             loading="lazy"
             referrerpolicy="strict-origin-when-cross-origin"

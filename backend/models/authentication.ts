@@ -3,7 +3,6 @@ import path from 'node:path'
 import { load } from 'js-yaml'
 import { asc, eq } from 'drizzle-orm'
 import { isSensitiveMask, parseModuleProps } from '../helpers/common.ts'
-import { parseIpRange } from '../helpers/network.ts'
 import { authentication as authenticationTable, groups as groupsTable } from '../db/schema.ts'
 import type { ModuleProp } from '../helpers/common.ts'
 import type { SystemIds } from './types.ts'
@@ -160,15 +159,23 @@ function isBuiltInLocal(id: string): boolean {
 }
 
 /**
- * The instance-wide authentication settings, i.e. the half of the `auth` settings blob a person
- * sets. The rest of that blob — the session secret, the signing keypair, the seeded IDs — is the
- * installation's own and is never read or written through here.
+ * The instance-wide authentication switches: the on/off half of the settings a person sets on the
+ * Configuration screen. The rest of the `auth` settings blob — the session secret, the signing
+ * keypair, the seeded IDs — is the installation's own and is never read or written through here.
  */
-export const AUTH_CONFIG_FIELDS = [
+export const AUTH_SWITCHES = [
   'allowPasskeys',
   'allowProfileEditing',
   'allowPersonalTokens'
 ] as const
+
+/**
+ * A domain name as WebAuthn accepts one for an RP ID: dot-separated labels of letters, digits and
+ * inner hyphens. The last label must not be all digits, which also rules out an IPv4 address. A
+ * browser cannot use an IP address as an RP ID.
+ */
+const RP_ID_PATTERN =
+  /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*(?![0-9]+$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 
 /**
  * Authentication model
@@ -181,19 +188,18 @@ class Authentication {
   getPublicConfig(): Record<string, any> {
     const auth = WIKI.config.auth ?? {}
     const config: Record<string, any> = {}
-    for (const field of AUTH_CONFIG_FIELDS) {
+    for (const field of AUTH_SWITCHES) {
       config[field] = auth[field] !== false
     }
     return config
   }
 
-  /**
-   * The instance-wide authentication settings, as the admin area expects them: the switches plus
-   * the avatar allow list, which names addresses inside the wiki's own network and so is not
-   * something to tell a visitor.
-   */
+  /** The instance-wide authentication settings, as the admin area expects them. */
   getConfig(): Record<string, any> {
-    return { ...this.getPublicConfig(), avatarFetchAllowList: this.avatarFetchAllowList() }
+    return {
+      ...this.getPublicConfig(),
+      passkeyRpId: WIKI.config.auth?.passkeyRpId ?? ''
+    }
   }
 
   /**
@@ -204,25 +210,27 @@ class Authentication {
    */
   pickFields(body: Record<string, any>): Record<string, any> {
     const patch: Record<string, any> = {}
-    for (const field of AUTH_CONFIG_FIELDS) {
+    for (const field of AUTH_SWITCHES) {
       if (body[field] !== undefined) {
         patch[field] = Boolean(body[field])
       }
     }
-    if (Array.isArray(body.avatarFetchAllowList)) {
-      // -> Normalised on the way in, so what is stored is exactly what `validate` checked
-      patch.avatarFetchAllowList = [
-        ...new Set(body.avatarFetchAllowList.map((entry: unknown) => String(entry).trim()))
-      ].filter(Boolean)
+    if (typeof body.passkeyRpId === 'string') {
+      // -> Normalised before storing, so the stored value is exactly what `validate` checked and
+      //    what `passkeys.rpIdFor` compares hostnames against
+      patch.passkeyRpId = body.passkeyRpId.trim().toLowerCase().replace(/\.$/, '')
     }
     return patch
   }
 
-  /** @returns The reason the patch cannot be saved, or null when it is fine */
+  /**
+   * Check a patch picked by `pickFields`.
+   *
+   * @returns The reason it is invalid, or null when it is fine
+   */
   validate(patch: Record<string, any>): string | null {
-    const bad = patch.avatarFetchAllowList?.find((entry: string) => !parseIpRange(entry))
-    if (bad) {
-      return `'${bad}' is not an IP address or CIDR range, e.g. 10.0.0.5 or 10.0.0.0/24.`
+    if (patch.passkeyRpId && !RP_ID_PATTERN.test(patch.passkeyRpId)) {
+      return `"${patch.passkeyRpId}" is not a valid passkey domain. Enter a domain name only, such as example.com, without a protocol, port or path.`
     }
     return null
   }
@@ -273,19 +281,6 @@ class Authentication {
    */
   arePersonalTokensAllowed(): boolean {
     return WIKI.config.auth?.allowPersonalTokens !== false
-  }
-
-  /**
-   * The non-public addresses an identity provider's picture URL may still be fetched from, as
-   * single addresses or CIDR ranges. Empty — the default — allows none, so only the public internet
-   * is reached: the URL is in a claim that at many providers the person signing in can edit. It is
-   * for a provider that serves pictures from inside the wiki's own network.
-   */
-  avatarFetchAllowList(): string[] {
-    const list = WIKI.config.auth?.avatarFetchAllowList
-    return Array.isArray(list)
-      ? list.filter((entry: unknown) => typeof entry === 'string' && entry.length > 0)
-      : []
   }
 
   async getStrategy(module: string) {

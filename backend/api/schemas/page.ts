@@ -127,7 +127,7 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
           type: 'string'
         },
         description:
-          'Changing these requires the `write:tags` permission, on the page as it stands and as the tags leave it. Sending the tags the page already carries asks nothing, which is what lets somebody without it save a tagged page.'
+          'Changing these requires the `write:tags` permission, on the page as it stands and as the tags leave it. Sending the tags the page already carries asks nothing, which is what lets somebody without it save a tagged page.\n\nA tag may only contain letters and numbers (in any script), spaces, hyphens, underscores and dots, with no surrounding whitespace. A tag the page already carries is not checked, so a page tagged before this rule existed can still be saved.'
       },
       allowBacklinks: { type: 'boolean' },
       allowComments: { type: 'boolean' },
@@ -214,6 +214,11 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
         type: 'boolean',
         description:
           'The page is password protected and this requester has not entered it, so `content`, `render` and `toc` were withheld. Unlock it with `POST …/unlock`.'
+      },
+      isEditLocked: {
+        type: 'boolean',
+        description:
+          'The page is locked against edits — unrelated to `isLocked`, which is about its password. While set, saving, converting, moving or deleting the page, and changing its owners or lifecycle rules, answers 423, as does suggesting an edit to it. Set and cleared with `PUT …/edit-lock`, which needs `manage:pages` on the page.'
       },
       relations: {
         type: 'array',
@@ -376,6 +381,11 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
             items: { type: 'string' },
             description:
               'The page permissions held AT THIS PATH, as this reader’s groups’ rules decide. The same answer `pages/userPermissions` gives for the path.'
+          },
+          canWriteOnSite: {
+            type: 'boolean',
+            description:
+              'Some rule of the requester’s grants `write:pages` somewhere on this site, in any locale — not necessarily here. With source access to this page, that is what offering to duplicate it turns on: the copy is saved wherever the requester may write, and the save is checked there.'
           },
           canSuggestEdits: {
             type: 'boolean',

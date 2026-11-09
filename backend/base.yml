@@ -219,15 +219,16 @@ defaults:
       # Whether passkeys may be used at all. Off, a passkey can neither be registered nor signed in
       # with — the ones already registered are kept, and work again the moment it is back on.
       allowPasskeys: true
+      # A shared domain that passkeys are bound to (the WebAuthn RP ID), so one passkey works on every
+      # site whose hostname is that domain or a subdomain of it. Empty binds each passkey to the
+      # hostname of the site it was registered on.
+      passkeyRpId: ''
       # Whether a user may edit their own profile — their name, their location, their avatar. Off
       # for an instance whose user records come from an identity provider and are written there.
       allowProfileEditing: true
       # Whether users may create personal access tokens under their profile. Off, the tokens already
       # created stop working as well — they are kept, and work again the moment it is back on.
       allowPersonalTokens: true
-      # Non-public addresses (single, or CIDR) an identity provider's picture URL may be fetched
-      # from. Empty allows none: the URL comes from a claim the user may be able to edit.
-      avatarFetchAllowList: []
     security:
       corsMode: 'OFF'
       corsConfig: ''
@@ -247,6 +248,10 @@ defaults:
       authRateLimitMax: 10
       authRateLimitWindow: '2m'
       authRateLimitBan: '15m'
+      # Non-public addresses (single, or CIDR) the wiki may still reach when it fetches a URL it was
+      # handed — an identity provider's picture, an image an import copies. Empty allows none, so
+      # only the public internet is reached.
+      privateFetchAllowList: []
     flags:
       experimental: false
       authDebug: false
@@ -263,35 +268,6 @@ defaults:
       methods: 'GET,POST'
       origin: true
     maintainerEmail: security@requarks.io
-tsDictMappings:
-  ar: arabic
-  hy: armenian
-  eu: basque
-  ca: catalan
-  da: danish
-  nl: dutch
-  en: english
-  fi: finnish
-  fr: french
-  de: german
-  el: greek
-  hi: hindi
-  hu: hungarian
-  id: indonesian
-  ga: irish
-  it: italian
-  lt: lithuanian
-  ne: nepali
-  no: norwegian
-  pt: portuguese
-  ro: romanian
-  ru: russian
-  sr: serbian
-  es: spanish
-  sv: swedish
-  ta: tamil
-  tr: turkish
-  yi: yiddish
 editors:
   asciidoc:
     contentType: adoc

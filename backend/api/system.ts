@@ -17,6 +17,7 @@ import type { DatedCommentInput } from '../models/comments.ts'
 import { SAMPLE_ACCOUNT_DOMAIN } from '../models/users.ts'
 import { PAGE_PROBLEM_CHECKS } from '../models/pageProblems.ts'
 import { purgeTimeframes } from '../models/pageHistory.ts'
+import { FALLBACK_DICTIONARY } from '../models/search.ts'
 import type { PurgeTimeframe } from '../models/pageHistory.ts'
 import type { FastifyInstance } from 'fastify'
 
@@ -88,22 +89,14 @@ async function getInstances(): Promise<Record<string, any>[]> {
     const conType = [':MAIN', ':WORKER'].some((ct) => inst.application_name.endsWith(ct))
       ? 'main'
       : 'sub'
-    // -> `db.execute()` with a raw SQL template returns timestamps as postgres-format strings
-    //    (e.g. `2026-07-25 13:17:36.230177+00`) rather than Dates, which is what the previous
-    //    `DateTime.fromSQL()` call was for. Temporal.Instant.from parses that format as-is,
-    //    including the space separator and the hour-only `+00` offset. Rendered with
-    //    millisecond precision to match the timestamps produced elsewhere.
-    inst.backend_start = Temporal.Instant.from(inst.backend_start).toString({
-      smallestUnit: 'millisecond'
-    })
-    inst.state_change = Temporal.Instant.from(inst.state_change).toString({
-      smallestUnit: 'millisecond'
-    })
+    const backendStart = toInstantString(inst.backend_start)
+    const stateChange = toInstantString(inst.state_change)
     const curInst = insts[instId] ?? {
       activeConnections: 0,
       activeListeners: 0,
-      dbFirstSeen: inst.backend_start,
-      dbLastSeen: inst.state_change
+      dbFirstSeen: null,
+      dbLastSeen: null,
+      ip: null
     }
     insts[instId] = {
       id: instId,
@@ -111,13 +104,41 @@ async function getInstances(): Promise<Record<string, any>[]> {
         conType === 'main' ? curInst.activeConnections + 1 : curInst.activeConnections,
       activeListeners: conType === 'sub' ? curInst.activeListeners + 1 : curInst.activeListeners,
       dbUser: inst.usename,
-      dbFirstSeen:
-        curInst.dbFirstSeen > inst.backend_start ? inst.backend_start : curInst.dbFirstSeen,
-      dbLastSeen: curInst.dbLastSeen < inst.state_change ? inst.state_change : curInst.dbLastSeen,
-      ip: inst.client_addr
+      dbFirstSeen: pickInstant(curInst.dbFirstSeen, backendStart, 'earliest'),
+      dbLastSeen: pickInstant(curInst.dbLastSeen, stateChange, 'latest'),
+      ip: inst.client_addr ?? curInst.ip
     }
   }
   return Object.values(insts)
+}
+
+/**
+ * A `pg_stat_activity` timestamp as an ISO string, or null where postgres withheld it.
+ *
+ * Postgres returns the row of a session the querying role holds no stats privilege over (it is not
+ * a member of that session's user, and lacks `pg_read_all_stats`) but nulls its timestamps and
+ * address. That covers this instance's own connections when it logs in as one role and acts as
+ * another (`ALTER ROLE … SET role`), a common least-privilege setup — the connection still counts.
+ *
+ * `db.execute()` with a raw SQL template returns timestamps as postgres-format strings
+ * (`2026-07-25 13:17:36.230177+00`), which Temporal.Instant.from parses as-is, space separator and
+ * hour-only offset included. Rendered with millisecond precision to match the rest of the codebase,
+ * which is also what lets {@link pickInstant} compare them as strings.
+ */
+function toInstantString(value: string | null): string | null {
+  return value ? Temporal.Instant.from(value).toString({ smallestUnit: 'millisecond' }) : null
+}
+
+/** The earlier or later of two ISO instants, either of which may be unknown. */
+function pickInstant(
+  a: string | null,
+  b: string | null,
+  which: 'earliest' | 'latest'
+): string | null {
+  if (!a || !b) {
+    return a ?? b
+  }
+  return (which === 'earliest' ? a < b : a > b) ? a : b
 }
 
 /**
@@ -409,7 +430,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Update the security configuration',
         description:
-          'Accepts any subset of the fields. Response headers, CSP, HSTS, CORS and `uploadMaxFileSize` are read when the HTTP server starts and therefore apply after a restart; `trustProxy`, `forceAssetDownload` and the rate limit are read per request and apply at once.',
+          'Accepts any subset of the fields. Response headers, CSP, HSTS, CORS and `uploadMaxFileSize` are read when the HTTP server starts and therefore apply after a restart; `trustProxy`, `forceAssetDownload`, the rate limit and `privateFetchAllowList` are read per request and apply at once.',
         tags: ['System'],
         body: { $ref: 'SecurityConfig#' },
         response: {
@@ -484,8 +505,31 @@ async function routes(app: FastifyInstance) {
               },
               availableDictionaries: {
                 type: 'array',
-                description: 'Dictionary names this postgres installation knows.',
+                description:
+                  'Text search configurations this database has, schema-qualified where the wiki search path does not reach them (`public.chinese`).',
                 items: { type: 'string' }
+              },
+              mappings: {
+                type: 'array',
+                description:
+                  'The mapping in force: the built-in defaults with `dictOverrides` laid over them, one entry per language or locale code. A regional locale (`pt-BR`) uses its own entry when it has one, otherwise its language entry; a locale with neither, or whose dictionary is not installed, is indexed with `fallbackDictionary`.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    locale: { type: 'string' },
+                    dictionary: { type: 'string' },
+                    source: { type: 'string', enum: ['builtin', 'override'] },
+                    builtin: {
+                      type: 'string',
+                      nullable: true,
+                      description: 'The built-in dictionary an override replaces, if any.'
+                    },
+                    installed: { type: 'boolean' }
+                  }
+                }
+              },
+              fallbackDictionary: {
+                type: 'string'
               }
             }
           }
@@ -493,9 +537,12 @@ async function routes(app: FastifyInstance) {
       }
     },
     async () => {
+      const availableDictionaries = await WIKI.models.search.getAvailableDictionaries()
       return {
         ...WIKI.models.search.getConfig(),
-        availableDictionaries: await WIKI.models.search.getAvailableDictionaries()
+        availableDictionaries,
+        mappings: WIKI.models.search.effectiveMappings(availableDictionaries),
+        fallbackDictionary: FALLBACK_DICTIONARY
       }
     }
   )
@@ -1132,14 +1179,17 @@ async function routes(app: FastifyInstance) {
                 },
                 dbFirstSeen: {
                   type: 'string',
-                  format: 'date-time'
+                  format: 'date-time',
+                  nullable: true
                 },
                 dbLastSeen: {
                   type: 'string',
-                  format: 'date-time'
+                  format: 'date-time',
+                  nullable: true
                 },
                 ip: {
-                  type: 'string'
+                  type: 'string',
+                  nullable: true
                 }
               }
             }

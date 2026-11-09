@@ -986,7 +986,7 @@ class Users {
    * providers the person signing in can edit, so `fetchPublic` follows only http(s), only to the
    * public internet and only redirects that stay there — this machine, its network and a cloud's
    * metadata service are not for a login to probe, short of a range an administrator opened under
-   * `auth.avatarFetchAllowList`. The download is capped and given a deadline, and
+   * `security.privateFetchAllowList`. The download is capped and given a deadline, and
    * the bytes have to sniff as an image exactly as an uploaded avatar's do. A provider that answers with a login page instead of a picture is a
    * provider whose HTML must not end up served back as somebody's avatar.
    *
@@ -1000,7 +1000,7 @@ class Users {
       const data = await fetchPublic(url, {
         limit: remoteAvatarLimit,
         timeout: 10_000,
-        allow: WIKI.models.authentication.avatarFetchAllowList()
+        allow: WIKI.models.security.privateFetchAllowList()
       })
       if (!detectImageMime(data)) {
         throw new Error('what came back is not a PNG, JPEG, WebP or GIF')
@@ -1055,6 +1055,23 @@ class Users {
       .innerJoin(groupsTable, eq(groupsTable.id, userGroups.groupId))
       .where(eq(userGroups.userId, userId))
       .orderBy(groupsTable.name)
+  }
+
+  /**
+   * Whether any group the user belongs to requires two-factor authentication of its members.
+   *
+   * One of three sources of the requirement, alongside the strategy's `enforceTfa` and the user's own
+   * `tfaRequired`, and asked everywhere those two are. The login itself reads it off the groups it
+   * already loads instead (`afterLoginChecks`).
+   */
+  async isTfaRequiredByGroup(userId: string): Promise<boolean> {
+    const rows = await WIKI.db
+      .select({ id: groupsTable.id })
+      .from(userGroups)
+      .innerJoin(groupsTable, eq(groupsTable.id, userGroups.groupId))
+      .where(and(eq(userGroups.userId, userId), eq(groupsTable.tfaRequired, true)))
+      .limit(1)
+    return rows.length > 0
   }
 
   /**
@@ -1269,7 +1286,8 @@ class Users {
    *
    * Reshaped from the stored `auth` blob the same way `getUserDetail()` does it, but reporting only
    * what the user may act on. `isTfaRequired` is what greys out the "turn off 2FA" button, so it
-   * accounts for the strategy enforcing 2FA for everyone as well as this user being flagged for it.
+   * accounts for the strategy enforcing 2FA for everyone, for a group of theirs requiring it, and for
+   * this user being flagged for it.
    */
   async getProfileAuthMethods(userId: string): Promise<UserProfileAuthMethod[]> {
     const user = await this.getById(userId)
@@ -1283,6 +1301,7 @@ class Users {
       below — has to read as the module's default there rather than as absent.
     */
     const strategies = await WIKI.models.authentication.getActiveStrategies()
+    const isTfaRequiredByGroup = await this.isTfaRequiredByGroup(userId)
     const methods: UserProfileAuthMethod[] = []
     for (const [strategyId, rawConfig] of Object.entries(
       (user.auth ?? {}) as Record<string, any>
@@ -1299,7 +1318,9 @@ class Users {
           isPasswordSet: Boolean(config.password),
           isTfaSetup: Boolean(config.tfaIsActive && config.tfaSecret),
           isTfaRequired: Boolean(
-            config.tfaRequired || (strategy?.config as Record<string, any>)?.enforceTfa
+            config.tfaRequired ||
+            isTfaRequiredByGroup ||
+            (strategy?.config as Record<string, any>)?.enforceTfa
           ),
           isPasswordLoginEnabled: !config.restrictLogin,
           canDisablePasswordLogin: countAlternativeLogins(user, strategyId) > 0,
@@ -1504,7 +1525,11 @@ class Users {
     // -> Turning it off would be undone at the next login, which is worth an error rather than a
     //    confusing round trip. The client greys the button out, but that is a client.
     const strategy = await WIKI.models.authentication.getStrategyById(strategyId)
-    if (auth[strategyId].tfaRequired || (strategy?.config as Record<string, any>)?.enforceTfa) {
+    if (
+      auth[strategyId].tfaRequired ||
+      (strategy?.config as Record<string, any>)?.enforceTfa ||
+      (await this.isTfaRequiredByGroup(userId))
+    ) {
       throw new Error('ERR_TFA_ENFORCED')
     }
 
@@ -1617,10 +1642,14 @@ class Users {
   async init(ids: SystemIds): Promise<void> {
     WIKI.logger.info('Inserting default users...')
 
+    // -> Normalized as every other address is (sign-in lowercases what is typed and matches it
+    //    exactly), and an empty value — `ADMIN_EMAIL=` from a compose file — falls back like an unset one
+    const adminEmail = (process.env.ADMIN_EMAIL ?? '').trim().toLowerCase() || 'admin@example.com'
+
     await WIKI.db.insert(usersTable).values([
       {
         id: ids.userAdminId,
-        email: process.env.ADMIN_EMAIL ?? 'admin@example.com',
+        email: adminEmail,
         auth: {
           [ids.authModuleId]: {
             password: await bcrypt.hash(process.env.ADMIN_PASS || '12345678', 12),
@@ -1683,6 +1712,12 @@ class Users {
         groupId: ids.groupGuestId
       }
     ])
+
+    WIKI.logger.info(
+      process.env.ADMIN_PASS
+        ? `Created administrator account <${adminEmail}> with the password from ADMIN_PASS`
+        : `Created administrator account <${adminEmail}> with the default password 12345678, which must be changed at first login`
+    )
   }
 
   async login(
@@ -1936,7 +1971,8 @@ class Users {
             id: true,
             permissions: true,
             redirectOnLogin: true,
-            redirectOnFirstLogin: true
+            redirectOnFirstLogin: true,
+            tfaRequired: true
           }
         }
       }
@@ -2006,7 +2042,11 @@ class Users {
           and this arm is simply never taken, which is what made "Enforce Two-Factor Authentication"
           do nothing at all.
         */
-      } else if (str.conf?.enforceTfa || authStr.tfaRequired) {
+      } else if (
+        str.conf?.enforceTfa ||
+        authStr.tfaRequired ||
+        (user.groups as any[]).some((grp) => grp.tfaRequired)
+      ) {
         try {
           const { secret, tfaQRImage } = await this.startTfaSetup(user, strategyId, context.siteId)
           const tfaToken = await this.generateToken({

@@ -1,4 +1,5 @@
 import { audit } from '../helpers/audit.ts'
+import { assertValidTags } from '../helpers/tags.ts'
 import { MAX_LIFECYCLE_RULES } from '../models/pageLifecycle.ts'
 import { actorFrom, mayOnPage, retagRefusal, unpublishedFor, userRequired } from './pages.ts'
 import type { FastifyInstance } from 'fastify'
@@ -81,6 +82,8 @@ async function routes(app: FastifyInstance) {
       if (!mayOnPage(req, 'write:pages', page)) {
         return reply.forbidden('You are not allowed to edit this page.')
       }
+      // -> Its rules are among its properties, which a lock holds as it holds the page itself
+      WIKI.models.pages.assertEditable(page)
 
       const rules = req.body.rules.map((rule) =>
         WIKI.models.pageLifecycle.normalize(rule, page.path)
@@ -108,6 +111,9 @@ async function routes(app: FastifyInstance) {
               )
             }
           } else if (action.kind === 'tags') {
+            // -> Asked of a changed rule only, like the permission below: one kept as it was keeps
+            //    whatever tags it was written with. A tag the page already has adds nothing.
+            assertValidTags(action.tags, page.tags ?? [])
             const refused = retagRefusal(req, page, [
               ...new Set([...(page.tags ?? []), ...action.tags])
             ])

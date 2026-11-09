@@ -189,14 +189,16 @@
                 -->
                 <div>
                   <strong>{{ props.row.meta?.actor?.name || t('admin.audit.anonymous') }}</strong>
-                  <w-icon
+                  <span
                     v-if="!props.row.userId && props.row.meta?.actor?.email"
-                    class="ml-1"
-                    name="la:user-slash"
-                    color="grey"
-                    size="xs">
+                    class="ml-1 inline-flex align-middle"
+                    data-tooltip-anchor
+                    role="img"
+                    tabindex="0"
+                    :aria-label="t('admin.audit.accountGone')">
+                    <w-icon name="la:user-slash" color="grey" size="xs" />
                     <w-tooltip>{{ t('admin.audit.accountGone') }}</w-tooltip>
-                  </w-icon>
+                  </span>
                 </div>
                 <small class="text-grey" v-if="props.row.meta?.actor?.email">
                   {{ props.row.meta.actor.email }}
@@ -526,7 +528,11 @@ async function exportLog() {
   try {
     const blob = await API_CLIENT.get('audit/export', { searchParams: filterParams() }).blob()
     const stamp = Temporal.Now.instant().toString({ smallestUnit: 'second' }).replaceAll(':', '-')
-    await fileSave(blob, {
+    /*
+      Re-typed with a bare MIME type: the response's own type carries `; charset=utf-8`, and the save
+      picker, which uses the blob's type as an `accept` key, rejects a type with parameters outright.
+    */
+    await fileSave(new Blob([blob], { type: 'application/x-ndjson' }), {
       fileName: `audit-log-${stamp}.jsonl`,
       extensions: ['.jsonl']
     })

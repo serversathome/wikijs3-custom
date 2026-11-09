@@ -1518,7 +1518,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Get the instance-wide authentication settings',
         description:
-          'The settings that hold for every site: whether passkeys may be used, whether a user may edit their own profile, whether users may create personal access tokens, and which non-public addresses an identity provider’s picture may be fetched from. Which strategies a site offers is part of that site’s configuration instead.',
+          'The settings that apply to every site: whether passkeys may be used and which domain they are bound to, whether a user may edit their own profile, and whether users may create personal access tokens. The strategies a site offers are part of that site’s own configuration.',
         tags: ['Authentication'],
         response: {
           200: { $ref: 'AuthConfig#' }
@@ -1577,8 +1577,7 @@ async function routes(app: FastifyInstance) {
       }
 
       // -> Recorded in full, as the security settings are: none of these is a secret, and what
-      //    they were set to is exactly what gets asked about after somebody loses a way in — or
-      //    after the avatar allow list let a login reach something inside the network
+      //    they were set to is exactly what gets asked about after somebody loses a way in
       await audit(req, 'admin', 'updateAuthConfig', patch)
 
       return {

@@ -117,12 +117,11 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
         description:
           'Whether users may create personal access tokens. Turned off, the tokens already created stop working too; they are kept, and work again the moment it is turned back on.'
       },
-      avatarFetchAllowList: {
-        type: 'array',
-        maxItems: 100,
-        items: { type: 'string', maxLength: 64 },
+      passkeyRpId: {
+        type: 'string',
+        maxLength: 253,
         description:
-          'Non-public addresses an identity provider’s picture URL may still be fetched from, as single addresses or CIDR subnets (`10.0.0.5`, `10.0.0.0/24`, `fd00::/8`). EMPTY — the default — allows none: only the public internet is reached, since the URL comes from a claim the person signing in may be able to edit. Answered to `authentication/config` only, never in `bootstrap`.'
+          'A shared domain to bind passkeys to (the WebAuthn RP ID), such as `example.com`, so that one passkey signs in on every site whose hostname is that domain or a subdomain of it. Empty, the default, binds each passkey to the hostname of the site it was registered on. A site whose hostname is outside the domain keeps using its own hostname. Passkeys already registered stay bound to the RP ID they were created with, so changing this means users register their passkeys again on the affected sites.'
       }
     }
   })

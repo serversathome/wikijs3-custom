@@ -218,11 +218,12 @@ export function resolvePagePath(
 /**
  * The stored render with everything that would *run* taken out.
  *
- * A page whose author holds `write:scripts` or `write:styles` keeps its `<script>` and `<style>` in
- * the render, and the app runs them when it displays the page. The same markup sitting in the document
- * as the browser parses it would run them a second time, before the app exists and outside anything
- * that knows about the page — so what goes into the shell is the prose and nothing else. Inline
- * handlers, `<template>` and `<link>` go for the same reason.
+ * A page whose author holds `write:styles` keeps its `<style>` in the render, and the app applies it
+ * when it displays the page. The same markup sitting in the document as the browser parses it would
+ * apply it a second time, before the app exists and outside anything that knows about the page — so
+ * what goes into the shell is the prose and nothing else. `<script>`, inline handlers, `<template>`
+ * and `<link>` go for the same reason; no render saved today carries the first two, since script on
+ * a page lives in its properties (`helpers/sanitizeRender.ts`).
  *
  * Not a security boundary, and not a second sanitizer: the render was sanitized at save time against
  * what its author was allowed to embed (`models/rendering.ts`), and this is that same markup with
@@ -478,7 +479,7 @@ function headForSite(siteConfig: any): string {
 
 /**
  * The copy of a page served to a client that will not run the app: the site's header over the page's
- * own body.
+ * title, description and own body.
  *
  * Wrapped in one element with a known id, which is what lets both sides deal with it: the stylesheet
  * in `frontend/index.html` keeps it out of sight of anyone whose browser is about to draw the real
@@ -506,12 +507,13 @@ function headForSite(siteConfig: any): string {
 async function prerenderFor(
   siteId: string,
   siteConfig: any,
-  locale: string,
+  page: PageDescription,
   content: string
 ): Promise<string> {
   if (!content) {
     return ''
   }
+  const locale = page.locale
   const translator = await WIKI.models.locales.translator(locale)
   const notice = `<noscript><p lang="${htmlEscape(translator.locale)}" dir="${translator.isRTL ? 'rtl' : 'ltr'}">${htmlEscape(translator.t('common.header.noScriptNotice'))}</p></noscript>`
   const siteTitle = htmlEscape(siteConfig?.title || 'Wiki.js')
@@ -520,16 +522,22 @@ async function prerenderFor(
   const header = siteConfig?.logoText
     ? `<img src="/_site/current/logo" alt=""><span>${siteTitle}</span>`
     : `<img src="/_site/current/logo" alt="${siteTitle}">`
-  return `<div id="${PRERENDER_ID}"><header><a href="${home}">${header}</a>${notice}</header><main${languageAttrs(locale)}>${content}</main></div>`
+  return `<div id="${PRERENDER_ID}"><header><a href="${home}">${header}</a>${notice}</header><main${languageAttrs(locale)}>${pageHeaderFor(page)}${content}</main></div>`
 }
 
 /**
- * The page's own markup, for a client that will not run the app.
- *
- * The title is deliberately not repeated above the body as a heading. A page written the ordinary way
- * opens with its own `# Title`, so a synthesized one is the same words twice — and where a page has
- * no heading of its own, the title is still in `<title>` and `og:title`, which is where every client
- * that cares about it looks.
+ * The page's title and description over its body, as the app draws them in the page header above
+ * the article — the body itself does not carry them, so without this a reader sees the content with
+ * nothing saying what it is.
+ */
+function pageHeaderFor(page: PageDescription): string {
+  const description = page.description ? `<p>${htmlEscape(page.description)}</p>` : ''
+  return `<header><h1>${htmlEscape(page.title)}</h1>${description}</header>`
+}
+
+/**
+ * The page's own markup, for a client that will not run the app. Its title and description are put
+ * above it by `prerenderFor`.
  */
 async function bodyForPage(siteId: string, page: PageDescription): Promise<string> {
   if (!page.render) {
@@ -701,7 +709,7 @@ async function fragmentsForCrawler(
     body: await prerenderFor(
       siteId,
       siteConfig,
-      page.locale,
+      page,
       page.editor === 'blog'
         ? await bodyForBlog(siteId, page)
         : page.editor === 'feedback'

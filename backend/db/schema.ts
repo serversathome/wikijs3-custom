@@ -583,6 +583,12 @@ export const groups = pgTable(
     redirectOnLogin: varchar({ length: 255 }).notNull().default(''),
     redirectOnFirstLogin: varchar({ length: 255 }).notNull().default(''),
     redirectOnLogout: varchar({ length: 255 }).notNull().default(''),
+    /**
+     * Whether every member must sign in with two-factor authentication, on top of the strategy's own
+     * `enforceTfa` and the user's own `tfaRequired`. Asked wherever those two are; see
+     * `users.isTfaRequiredByGroup`.
+     */
+    tfaRequired: boolean().notNull().default(false),
     isSystem: boolean().notNull().default(false),
     /**
      * What the directory provisioning this group calls it, as SCIM's `externalId`.
@@ -921,6 +927,38 @@ export const liveNoteImages = pgTable(
   (table) => [index('liveNoteImages_noteId_idx').on(table.noteId)]
 )
 
+/**
+ * The other names a live note answered to before it was imported — what an old URL carries, so that
+ * the reverse proxy in front of the wiki can send every one of them to `/n/<ref>` and still arrive.
+ *
+ * Written by the HedgeDoc import only (`models/importHedgedoc.ts`): the note's shortid (HedgeDoc's
+ * `/s/` and `/p/` URLs), its encoded id when the note is keyed by its alias, and whatever it was
+ * called that is not a valid key (an alias with a dot in it, an id starting with `_`). A ref is a
+ * credential exactly as a key is — HedgeDoc opened the note from any of them — so it is resolved only
+ * to somebody `liveNotes.rightsFor` lets read the note, and never listed or logged.
+ *
+ * A key wins over a ref: `/n/<x>` is the note keyed `x` if there is one, and only otherwise the note
+ * referred to as `x`. And a ref is never taken as a new key (`liveNotes.create`), so an old URL can
+ * not be shadowed by somebody creating a note under it.
+ */
+export const liveNoteLegacyRefs = pgTable(
+  'liveNoteLegacyRefs',
+  {
+    siteId: uuid()
+      .notNull()
+      .references(() => sites.id, { onDelete: 'cascade' }),
+    /** As it appeared in the old URL. Case-sensitive, unique per site. */
+    ref: varchar({ length: 255 }).notNull(),
+    noteId: uuid()
+      .notNull()
+      .references(() => liveNotes.id, { onDelete: 'cascade' })
+  },
+  (table) => [
+    primaryKey({ columns: [table.siteId, table.ref] }),
+    index('liveNoteLegacyRefs_noteId_idx').on(table.noteId)
+  ]
+)
+
 // LOCALES -----------------------------
 export const locales = pgTable(
   'locales',
@@ -1168,6 +1206,14 @@ export const pages = pgTable(
       (): SQL => sql`${pages.publishState} != 'draft' AND ${pages.isSearchable}`
     ),
     password: varchar({ length: 255 }),
+    /**
+     * Whether the page is locked against edits: its content, its properties, its owners and lifecycle
+     * rules, its editor, its path, and its existence. Set and cleared only with `manage:pages` on the
+     * page (`PUT …/edit-lock`); every write path in `models/pages.ts` refuses a locked page.
+     *
+     * Not the password lock, which is `password` above and `isLocked` on the API's page.
+     */
+    isEditLocked: boolean().notNull().default(false),
     /**
      * How readers have rated the page, per scale: `{ thumbs?: { count, sum, up, down }, stars?: … }`.
      * A cache of the `pageRatings` rows, rewritten by every rating and withdrawal (`models/pageRatings.ts`)
@@ -1615,7 +1661,7 @@ export const pageRenderQueue = pgTable(
   'pageRenderQueue',
   {
     id: uuid().primaryKey().defaultRandom(),
-    /** `write:scripts` — whether this render may keep `<script>` and inline handlers. */
+    /** `write:scripts` — whether this render may keep `<iframe>` embeds. */
     allowScripts: boolean().notNull().default(false),
     /** `write:styles` — whether this render may keep `<style>` and inline `style` attributes. */
     allowStyles: boolean().notNull().default(false),

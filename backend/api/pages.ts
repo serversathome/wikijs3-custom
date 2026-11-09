@@ -12,7 +12,7 @@ import {
 import { audit } from '../helpers/audit.ts'
 import { requestUserId } from '../helpers/requester.ts'
 import { maySeeUnpublished, maySeeUnpublishedAnywhere } from '../helpers/publishing.ts'
-import { generatePathHash, normalizePagePath } from '../helpers/common.ts'
+import { generatePathHash, normalizePagePath, pagePathToWrite } from '../helpers/common.ts'
 import { limitAuthAttempts, limitRenders } from '../helpers/rateLimit.ts'
 
 /** Comma-separated query lists, which is how the browser sends a multi-valued filter here. */
@@ -1168,6 +1168,16 @@ async function routes(app: FastifyInstance) {
         viewer: {
           canMarkReviewed,
           permissions: pagePermissionsFor(req, page),
+          /*
+            Whether a copy of this page could be saved anywhere on the site, which is what the page
+            view offers Duplicate Page on alongside the source: a page whose readers may see its source
+            is a template for anybody who may write somewhere, without granting them this page.
+          */
+          canWriteOnSite: WIKI.models.groups.grantsAnywhere(
+            WIKI.models.groups.actorForRequest(req),
+            'write:pages',
+            req.params.siteId
+          ),
           ...approvalState,
           isWatching,
           rating: ownRating,
@@ -1323,11 +1333,15 @@ async function routes(app: FastifyInstance) {
         is going to and the tags it is arriving with. A tag rule has nothing else to read here — the
         tags a new page carries are the ones in this request — and leaving them out would make a
         rule addressing tags silently miss every page the moment it was created.
+
+        And at the path and locale it will be STORED under, which the model is then handed: the path
+        as the request spelled it would let `HR/Notice` past a rule over `hr` and land at `hr/notice`,
+        and a locale left out would be matched by every locale's rules and land in the primary one.
       */
       const incoming = {
         siteId: req.params.siteId,
-        path: req.body.path,
-        locale: req.body.locale,
+        path: pagePathToWrite(req.body.path),
+        locale: req.body.locale || WIKI.models.pages.defaultLocale(req.params.siteId),
         tags: req.body.tags ?? []
       }
       if (!mayOnPage(req, 'write:pages', incoming)) {
@@ -1343,7 +1357,7 @@ async function routes(app: FastifyInstance) {
       }
       const { page, versionId } = await WIKI.models.pages.createPage(
         req.params.siteId,
-        req.body,
+        { ...req.body, path: incoming.path, locale: incoming.locale },
         actor
       )
 
@@ -1638,7 +1652,7 @@ async function routes(app: FastifyInstance) {
                   skipped: {
                     type: 'array',
                     description:
-                      'The skipped pages the caller may read. `forbidden`: the caller may not edit it. `notInSource`: the link could not be found in its source. `failed`: the save was refused.',
+                      'The skipped pages the caller may read. `forbidden`: the caller may not edit it. `locked`: it is locked against edits. `notInSource`: the link could not be found in its source. `failed`: the save was refused.',
                     items: {
                       type: 'object',
                       properties: {
@@ -1646,7 +1660,10 @@ async function routes(app: FastifyInstance) {
                         locale: { type: 'string' },
                         path: { type: 'string' },
                         title: { type: 'string' },
-                        reason: { type: 'string', enum: ['forbidden', 'notInSource', 'failed'] }
+                        reason: {
+                          type: 'string',
+                          enum: ['forbidden', 'locked', 'notInSource', 'failed']
+                        }
                       }
                     }
                   },
@@ -1684,11 +1701,12 @@ async function routes(app: FastifyInstance) {
       /*
         And at the destination, when that is somewhere else: rules are granted per path AND per
         locale, so a move is a write to a place the mover may have no say over — which without this
-        is a way to put a page somewhere they could not have created one.
+        is a way to put a page somewhere they could not have created one. Asked of the path as it
+        will be stored, which is what the model is handed, rather than as the request spelled it.
       */
       const destination = {
         siteId: req.params.siteId,
-        path: req.body.path.replace(/^\/+/, ''),
+        path: pagePathToWrite(req.body.path, target.path),
         locale: req.body.locale || target.locale,
         tags: target.tags
       }
@@ -1701,7 +1719,7 @@ async function routes(app: FastifyInstance) {
       const change = await WIKI.models.pages.movePage(
         req.params.siteId,
         req.params.pageId,
-        req.body,
+        { ...req.body, path: destination.path, locale: destination.locale },
         actor
       )
       if (!change) {
@@ -1902,6 +1920,78 @@ async function routes(app: FastifyInstance) {
   )
 
   /**
+   * LOCK / UNLOCK PAGE EDITS
+   */
+  app.put<{ Params: { siteId: string; pageId: string }; Body: { isEditLocked: boolean } }>(
+    '/sites/:siteId/pages/:pageId/edit-lock',
+    {
+      config: {
+        scope: 'pages'
+      },
+      /*
+        No route-level `permissions`: `manage:pages` is a page rule permission, granted per path by a
+        group's RULES, which the group-wide list that hook reads cannot answer. Checked against the
+        page in question below instead.
+      */
+      schema: {
+        summary: 'Lock a page against edits, or unlock it',
+        description:
+          'A locked page cannot be saved, converted to another editor, moved, renamed or deleted, and its owners and lifecycle rules cannot be changed — each of those answers 423 until the page is unlocked. Nor does it take edit suggestions.\n\nNeeds `manage:pages` on the page, both ways. Not a page edit: records no version, and is not undone by restoring one.\n\nUnrelated to a page password, which is `POST …/unlock`.',
+        tags: ['Pages'],
+        params: pageIdParam,
+        body: {
+          type: 'object',
+          required: ['isEditLocked'],
+          properties: {
+            isEditLocked: { type: 'boolean' }
+          }
+        },
+        response: {
+          200: {
+            description: 'The lock as it now stands',
+            type: 'object',
+            properties: {
+              ok: { type: 'boolean' },
+              isEditLocked: { type: 'boolean' }
+            }
+          }
+        }
+      }
+    },
+    async (req, reply) => {
+      const actor = actorFrom(req)
+      if (!actor) {
+        return reply.unauthorized(userRequired(req, 'Locking a page'))
+      }
+      const target = await WIKI.models.pages.getPage({
+        siteId: req.params.siteId,
+        id: req.params.pageId
+      })
+      if (!target) {
+        return reply.notFound('This page does not exist.')
+      }
+      if (!mayOnPage(req, 'manage:pages', target)) {
+        return reply.forbidden('Locking or unlocking a page needs manage:pages on it.')
+      }
+      const { isEditLocked } = req.body
+      // -> Nothing to record for a lock that already stood as asked
+      if (target.isEditLocked !== isEditLocked) {
+        if (!(await WIKI.models.pages.setEditLock(req.params.siteId, target.id, isEditLocked))) {
+          return reply.notFound('This page does not exist.')
+        }
+        await audit(req, 'page', isEditLocked ? 'lockPageEdits' : 'unlockPageEdits', {
+          pageId: target.id,
+          siteId: req.params.siteId,
+          locale: target.locale,
+          path: target.path,
+          title: target.title
+        })
+      }
+      return { ok: true, isEditLocked }
+    }
+  )
+
+  /**
    * RECYCLE BIN
    */
   app.get<{ Params: { siteId: string }; Querystring: { locale: string } }>(
@@ -1992,7 +2082,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Restore a deleted page',
         description:
-          "Bring a page back out of the recycle bin under its own id, so its whole history comes back with it. The page is restored as the deletion's snapshot held it; only its render is the caller's, produced from that snapshot's source the way an editor produces one, and sanitized against what the caller may embed.\n\nBack where it was unless `path` / `locale` say otherwise. A path another page has taken since answers 409 `pageDuplicatePath`, and a `versionId` that is no longer the page's deletion (it was restored and deleted again meanwhile) answers 409 `pageRestoreStale`.\n\nNeeds `delete:pages` where the page was when it was deleted, and at the destination when that is somewhere else.",
+          "Bring a page back out of the recycle bin under its own id, so its whole history comes back with it. The page is restored as the deletion's snapshot held it; only its render is the caller's, produced from that snapshot's source the way an editor produces one, and sanitized against what the caller may embed. Its own scripts come back only if the caller holds `write:scripts` at the destination, and its CSS only with `write:styles`; otherwise each is restored empty.\n\nBack where it was unless `path` / `locale` say otherwise. A path another page has taken since answers 409 `pageDuplicatePath`, and a `versionId` that is no longer the page's deletion (it was restored and deleted again meanwhile) answers 409 `pageRestoreStale`.\n\nNeeds `delete:pages` where the page was when it was deleted, and at the destination when that is somewhere else.",
         tags: ['Pages'],
         params: pageIdParam,
         body: {
@@ -2054,9 +2144,10 @@ async function routes(app: FastifyInstance) {
       ) {
         return reply.notFound('This page is not in the recycle bin.')
       }
-      // -> Somewhere else is somewhere this caller has to be allowed to put it, on the same terms
+      // -> Somewhere else is somewhere this caller has to be allowed to put it, on the same terms --
+      //    and asked of the path the restore will write, not of the one the request spelled
       const destination = {
-        path: req.body.path ? normalizePagePath(req.body.path) : deletion.path,
+        path: req.body.path ? pagePathToWrite(req.body.path, deletion.path) : deletion.path,
         locale: req.body.locale || deletion.locale,
         tags: deletion.meta.tags
       }
@@ -2519,15 +2610,20 @@ async function routes(app: FastifyInstance) {
         { pageId: page.id, alias: page.alias }
       )
 
+      // -> A page that is not live is listed only for whoever may edit it, as the page view decides
+      const unpublished = unpublishedFor(req)
       return backlinks
-        .filter((link) =>
-          mayOnPage(req, 'read:pages', {
+        .filter((link) => {
+          const ref = {
             siteId: link.siteId,
             locale: link.locale,
             path: link.path,
             tags: link.tags
-          })
-        )
+          }
+          return (
+            (link.isLive || (unpublished && unpublished(ref))) && mayOnPage(req, 'read:pages', ref)
+          )
+        })
         .map((link) => ({
           id: link.pageId,
           siteId: link.siteId,
@@ -2597,33 +2693,40 @@ async function routes(app: FastifyInstance) {
       }
 
       const links = await WIKI.models.pageLinks.outboundFor(page.id)
+      const unpublished = unpublishedFor(req)
 
-      return links.map((link) => ({
-        href: link.href,
-        kind: link.kind,
-        targetSiteId: link.targetSiteId,
-        targetLocale: link.targetLocale,
-        targetPath: link.targetPath,
-        targetId: link.targetPageId,
+      return links.map((link) => {
         /*
           Only what the caller may read, for the reason the backlinks route filters: whether a page
           exists at a path is something a rule decides they may know. A link to a page they may not
-          read reads as a link to nothing, which is also what clicking it would give them.
+          read reads as a link to nothing, which is also what clicking it would give them — so its
+          id goes with its title.
 
           Judged on where the RESOLVED page sits rather than on what the link said about it — an alias
           or an id link names no address at all — and with its tags, since a rule may be written
-          against those.
+          against those. A page that is not live is held to the page view's rule as well.
         */
-        ...(link.targetPageId &&
-        !mayOnPage(req, 'read:pages', {
+        const target = {
           siteId: link.targetSiteId,
           locale: link.targetPageLocale ?? undefined,
           path: link.targetPagePath ?? '',
           tags: link.targetPageTags ?? []
-        })
-          ? { targetTitle: null, exists: false }
-          : { targetTitle: link.targetTitle, exists: Boolean(link.targetPageId) })
-      }))
+        }
+        const visible =
+          Boolean(link.targetPageId) &&
+          (link.targetIsLive || (unpublished && unpublished(target))) &&
+          mayOnPage(req, 'read:pages', target)
+        return {
+          href: link.href,
+          kind: link.kind,
+          targetSiteId: link.targetSiteId,
+          targetLocale: link.targetLocale,
+          targetPath: link.targetPath,
+          targetId: visible ? link.targetPageId : null,
+          targetTitle: visible ? link.targetTitle : null,
+          exists: visible
+        }
+      })
     }
   )
 

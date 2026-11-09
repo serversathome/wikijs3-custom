@@ -126,6 +126,11 @@ export interface ListedPage {
    * index block that lists them. Only on a page the reader may open, whose tags it already shows.
    */
   tags: string[]
+  /**
+   * When the page last changed, from its tree row: the date a folder listing shows, and the one an
+   * `updatedAt` ordering sorts by, so a block drawing it agrees with its own order.
+   */
+  updatedAt: Date
 }
 
 /**
@@ -140,6 +145,18 @@ export interface DeletedEntry {
   folderPath: string
   fileName: string
   locale: string
+}
+
+/** An entry under a folder, as `getBranch` describes it for a permission check. */
+export interface BranchEntry {
+  type: TreeItemType
+  /** Slash-separated path of the entry itself, from the site root. */
+  path: string
+  locale: string
+  /** A page's own tags, which a rule may address it by. */
+  tags: string[]
+  /** Whether a page is live. Always false for a folder or an asset. */
+  isLive: boolean
 }
 
 /** A raw `tree` row, as the model passes it around internally. */
@@ -326,6 +343,9 @@ class Tree {
    * @param includeAncestors Also return every folder between the root and the one being listed, so a
    *                         caller opening a deep folder gets the branch it hangs off in one request.
    * @param includeRootFolders Also return every folder at the root, for the same reason.
+   * @param unpublished Whether a page that is not live may be listed. See `pageIsVisible` — but only
+   *                    its liveness half: this is the file manager's view, so a page kept out of the
+   *                    reader's tree with `isBrowsable` is still listed here.
    */
   async getTree({
     siteId,
@@ -340,7 +360,8 @@ class Tree {
     orderByDirection = 'asc',
     depth = 0,
     includeAncestors = false,
-    includeRootFolders = false
+    includeRootFolders = false,
+    unpublished = false
   }: {
     siteId: string
     parentId?: string | null
@@ -355,6 +376,7 @@ class Tree {
     depth?: number
     includeAncestors?: boolean
     includeRootFolders?: boolean
+    unpublished?: Unpublished
   }): Promise<TreeItem[]> {
     if (offset < 0) {
       throw new CustomError('treeInvalidOffset', 'The offset cannot be negative.')
@@ -410,20 +432,39 @@ class Tree {
       //    comma-separated form `inArray` needs — and `@>` wants one array-typed parameter
       conditions.push(sql`${treeTable.tags} @> ${sql.param(tags)}`)
     }
+    if (!unpublished) {
+      // -> Only pages have a publish state. A page row whose page is missing joins to nulls, which
+      //    are not live either
+      conditions.push(or(ne(treeTable.type, 'page'), liveCondition(pagesTable)))
+    }
 
     const direction = orderByDirection === 'desc' ? desc : asc
     const rows = await WIKI.db
       .select({
         row: treeTable,
-        depth: sql<number>`nlevel(${treeTable.folderPath})`.mapWith(Number)
+        depth: sql<number>`nlevel(${treeTable.folderPath})`.mapWith(Number),
+        isLive: sql<boolean>`${liveCondition(pagesTable)}`.mapWith(Boolean)
       })
       .from(treeTable)
+      .leftJoin(pagesTable, and(eq(treeTable.type, 'page'), eq(pagesTable.id, treeTable.id)))
       .where(and(...conditions))
       .orderBy(asc(sql`nlevel(${treeTable.folderPath})`), direction(treeTable[orderBy]))
       .limit(limit)
       .offset(offset)
 
-    return rows.map(({ row, depth: rowDepth }) => toTreeItem(row as TreeRow, rowDepth, path))
+    return rows.flatMap(({ row, depth: rowDepth, isLive }) => {
+      const item = toTreeItem(row as TreeRow, rowDepth, path)
+      if (item.type !== 'page') {
+        return [item]
+      }
+      const ref = {
+        siteId,
+        locale: item.locale,
+        path: item.folderPath ? `${item.folderPath}/${item.fileName}` : item.fileName,
+        tags: item.tags
+      }
+      return isListable(unpublished, isLive, ref) ? [item] : []
+    })
   }
 
   /**
@@ -486,6 +527,7 @@ class Tree {
         fileName: treeTable.fileName,
         title: treeTable.title,
         tags: treeTable.tags,
+        updatedAt: treeTable.updatedAt,
         description: pagesTable.description,
         icon: pagesTable.icon,
         iconColor: sql<string | null>`${pagesTable.config}->>'iconColor'`,
@@ -515,7 +557,8 @@ class Tree {
         description: row.description ?? '',
         icon: row.icon ?? '',
         iconColor: row.iconColor ?? '',
-        tags: row.tags ?? []
+        tags: row.tags ?? [],
+        updatedAt: row.updatedAt
       }
       const ref = { siteId, locale, path: page.path, tags: page.tags }
       return isListable(unpublished, row.isLive, ref) &&
@@ -711,6 +754,51 @@ class Tree {
   }
 
   /**
+   * Everything under a folder, at any depth, in the folder's own locale.
+   *
+   * What a caller about to act on the whole branch has to hold its permissions against: deleting,
+   * moving or copying a folder does the same thing to every entry under it, and a page rule can be
+   * written for any of them. Scoped to the locale as the operations themselves are (see
+   * `deleteFolder`), so that what is checked is exactly what would be touched.
+   */
+  async getBranch(folder: {
+    siteId: string
+    locale: string
+    folderPath?: string | null
+    fileName: string
+  }): Promise<BranchEntry[]> {
+    const rows = await WIKI.db
+      .select({
+        type: treeTable.type,
+        folderPath: treeTable.folderPath,
+        fileName: treeTable.fileName,
+        locale: treeTable.locale,
+        tags: treeTable.tags,
+        // -> Null for anything but a page, which has no `pages` row to join
+        isLive: sql<boolean>`coalesce(${liveCondition(pagesTable)}, false)`.mapWith(Boolean)
+      })
+      .from(treeTable)
+      .leftJoin(pagesTable, eq(pagesTable.id, treeTable.id))
+      .where(
+        and(
+          eq(treeTable.siteId, folder.siteId),
+          eq(treeTable.locale, folder.locale),
+          sql`${treeTable.folderPath} <@ ${childPathOf(folder)}::ltree`
+        )
+      )
+    return rows.map((row) => {
+      const parent = decodeTreePath(row.folderPath)
+      return {
+        type: row.type,
+        path: parent ? `${parent}/${row.fileName}` : row.fileName,
+        locale: row.locale,
+        tags: row.tags ?? [],
+        isLive: row.type === 'page' && row.isLive
+      }
+    })
+  }
+
+  /**
    * Whatever already sits at a name inside a folder, or null if the name is free.
    *
    * The question an upload has to ask before it writes anything, since what is there decides whether
@@ -788,33 +876,102 @@ class Tree {
       return folder
     }
 
-    const { folderPath, fileName } = splitPath(encodeTreePath(path))
-    const results = await WIKI.db
-      .select()
-      .from(treeTable)
-      .where(
-        and(
-          eq(treeTable.siteId, siteId!),
-          eq(treeTable.locale, locale!),
-          eq(treeTable.folderPath, folderPath),
-          eq(treeTable.fileName, fileName),
-          eq(treeTable.type, 'folder')
+    const folderAt = async (slashPath?: string | null): Promise<TreeRow | null> => {
+      const { folderPath, fileName } = splitPath(encodeTreePath(slashPath))
+      const results = await WIKI.db
+        .select()
+        .from(treeTable)
+        .where(
+          and(
+            eq(treeTable.siteId, siteId!),
+            eq(treeTable.locale, locale!),
+            eq(treeTable.folderPath, folderPath),
+            eq(treeTable.fileName, fileName),
+            eq(treeTable.type, 'folder')
+          )
         )
-      )
-      .limit(1)
-    if (results[0]) {
-      return results[0] as TreeRow
+        .limit(1)
+      return (results[0] as TreeRow) ?? null
+    }
+
+    const existing = await folderAt(path)
+    if (existing) {
+      return existing
     }
     if (!createIfMissing) {
       throw new CustomError('treeInvalidFolder', 'This folder does not exist.', 404)
     }
+    // -> What it would be created as is looked for before it is created: a folder created from
+    //    `img_2` is called `img-2`, and asking for `img_2` again has to find it rather than collide
+    //    with it
+    const written = await this.folderPathAsFiled({ siteId: siteId!, locale: locale!, path })
+    const found = await folderAt(written)
+    if (found) {
+      return found
+    }
+    const segments = written.split('/')
+    const name = segments.pop()!
     return this.createFolder({
-      parentPath: decodeTreePath(folderPath),
-      pathName: fileName,
-      title: fileName,
+      parentPath: segments.join('/'),
+      pathName: name,
+      title: name,
       locale: locale!,
       siteId: siteId!
     })
+  }
+
+  /**
+   * A slash-separated folder path as the tree files it, for a path that came from outside — a file in
+   * a storage target, a path somebody typed.
+   *
+   * Each segment is spelled the way an existing folder at that level spells it: under its own name
+   * where a folder by that name is there (one created before underscores became hyphens keeps its
+   * `_`), otherwise under the name `createFolder` would give it. Once one level is missing, every
+   * level below it is missing too and is spelled as it would be written.
+   *
+   * Nothing is created, and a path is not checked for whether it could be: a segment that normalizes
+   * to nothing is left as it was, for `createFolder` to refuse.
+   */
+  async folderPathAsFiled({
+    siteId,
+    locale,
+    path
+  }: {
+    siteId: string
+    locale: string
+    path?: string | null
+  }): Promise<string> {
+    const segments = (path ?? '').split('/').filter(Boolean)
+    const filed: string[] = []
+    let parent = ''
+    for (const [i, segment] of segments.entries()) {
+      const asGiven = segment.toLowerCase().normalize('NFC')
+      const asWritten = normalizeNewPagePath(segment) || asGiven
+      const rows = await WIKI.db
+        .select({ folderPath: treeTable.folderPath, fileName: treeTable.fileName })
+        .from(treeTable)
+        .where(
+          and(
+            eq(treeTable.siteId, siteId),
+            eq(treeTable.locale, locale),
+            eq(treeTable.folderPath, parent),
+            inArray(treeTable.fileName, [asGiven, asWritten]),
+            eq(treeTable.type, 'folder')
+          )
+        )
+      const row = rows.find((r) => r.fileName === asGiven) ?? rows[0]
+      if (!row) {
+        filed.push(
+          ...segments
+            .slice(i)
+            .map((s) => normalizeNewPagePath(s) || s.toLowerCase().normalize('NFC'))
+        )
+        break
+      }
+      filed.push(row.fileName)
+      parent = childPathOf(row)
+    }
+    return filed.join('/')
   }
 
   /**
@@ -994,6 +1151,44 @@ class Tree {
   }
 
   /**
+   * Refuse to rename, move or delete a folder holding a page that is locked against edits.
+   *
+   * Each of those changes every page under the folder — its path, or whether it exists — without going
+   * through `pages.movePage` or `pages.deletePage`, so the lock those refuse at has to be asked here
+   * too. Asked of exactly the rows the three operations touch: the folder's descendants in its own
+   * locale, by the `<@` they use. Refused whole, before anything is written, rather than skipping the
+   * locked pages: a folder moved without some of its pages is a folder split in two.
+   *
+   * Counts rather than names them: whoever is moving the folder need not be able to read every page in
+   * it, and which ones are locked is the business of whoever can.
+   */
+  async assertNoLockedPages(folder: TreeRow): Promise<void> {
+    const [row] = await WIKI.db
+      .select({ count: sql<number>`count(*)`.mapWith(Number) })
+      .from(treeTable)
+      .innerJoin(pagesTable, eq(pagesTable.id, treeTable.id))
+      .where(
+        and(
+          eq(treeTable.siteId, folder.siteId),
+          eq(treeTable.locale, folder.locale),
+          eq(treeTable.type, 'page'),
+          sql`${treeTable.folderPath} <@ ${childPathOf(folder)}::ltree`,
+          eq(pagesTable.isEditLocked, true)
+        )
+      )
+    const count = row?.count ?? 0
+    if (count > 0) {
+      throw new CustomError(
+        'treeFolderHasLockedPages',
+        count === 1
+          ? 'This folder contains a page that is locked against edits, so it cannot be renamed, moved or deleted until that page is unlocked.'
+          : `This folder contains ${count} pages that are locked against edits, so it cannot be renamed, moved or deleted until they are unlocked.`,
+        423
+      )
+    }
+  }
+
+  /**
    * Rename a folder, moving everything under it along with it.
    *
    * @param pathName The new path segment, normalized as on the way in. Unchanged from the current
@@ -1044,6 +1239,9 @@ class Tree {
       )
       return updated[0] as TreeRow
     }
+
+    // -> Only now: a change of title alone moves nothing, and is allowed over a locked page
+    await this.assertNoLockedPages(folder)
 
     // -> As on the way in: a page may share the name, an asset may not
     const existing = await WIKI.db
@@ -1385,7 +1583,9 @@ class Tree {
               showSidebar: page.showSidebar,
               showTags: page.showTags
             },
-            actor
+            actor,
+            // -> A copy adds no tag: what it carries is the source's, invalid or not
+            { carriedTags: page.tags }
           )
           break
         }
@@ -1524,6 +1724,9 @@ class Tree {
       destinationLocale,
       [requested, folder.fileName].filter(Boolean).join('/')
     )
+
+    // -> Before the destination is resolved as well, which may create folders on the way
+    await this.assertNoLockedPages(folder)
 
     const parent = requested
       ? await this.getFolder({
@@ -1824,6 +2027,7 @@ class Tree {
     if (!folder) {
       throw new CustomError('treeInvalidFolder', 'This folder does not exist.', 404)
     }
+    await this.assertNoLockedPages(folder)
     const path = childPathOf(folder)
     WIKI.logger.debug(`Deleting folder ${folder.id} at path ${path}...`)
 

@@ -201,6 +201,31 @@ export class MarkdownRenderer {
     this.md.block.ruler.disable('mdc_block_slots')
 
     /*
+      MDC's YAML props, held to the one place the MDC syntax puts them: the line straight after a
+      block's opening `::name`.
+
+      As shipped, the rule claims a `---` line ANYWHERE inside a block, reading everything up to the
+      next `---` as YAML. That is a thematic break everywhere else in markdown, and separating sections
+      with one is common -- pages imported from 2.x carry them inside `::block-tab` once their tabsets
+      are converted. Text between two of them that was not valid YAML took the render down
+      (`YAMLParseError`, `Unresolved alias`); text that happened to be valid YAML (`Verdict : True`)
+      was worse, swallowed as props without a word, and never shown.
+
+      The rule runs ahead of `hr`, so declining here is all it takes for the line to render as `<hr>`.
+      The innermost open block is the first of `mdcBlockTokens`, and its `map` starts at its opening
+      line.
+    */
+    const yamlRule = this.md.block.ruler.__rules__.find((rule) => rule.name === 'mdc_block_yaml')
+    const blockYaml = yamlRule.fn
+    this.md.block.ruler.at('mdc_block_yaml', (state, startLine, endLine, silent) => {
+      const block = state.env.mdcBlockTokens?.[0]
+      if (!block?.map || startLine !== block.map[0] + 1) {
+        return false
+      }
+      return blockYaml(state, startLine, endLine, silent)
+    })
+
+    /*
       MDC's inline span, `[text]{.class}`, claims every `[` it meets — including the `[^1]` of a
       footnote reference, which came out as `<span>^1</span>`. The note itself then vanished too,
       since a definition nothing refers to is dropped. Rule order settles it whatever order the
@@ -234,6 +259,16 @@ export class MarkdownRenderer {
       answer is no -- the bracket is then counted as plain text, as it is without MDC, and the label is
       tokenized for real afterwards, span and all.
 
+      A shortcut reference link is the third reading, `[MyMiniFactory]` with a
+      `[MyMiniFactory]: https://…` definition elsewhere on the page. MDC steps aside for `[text](…)`
+      and `[text][ref]` by looking at the character after the `]`, but a shortcut reference has
+      nothing after it, so every one rendered as a `<span>` and its definition went unused -- on pages
+      that linked that way in 2.x, where the link rule had the brackets to itself. The label is
+      measured the way the link rule measures it and looked up the way it looks it up, so the two
+      agree on what is a link: a label with a definition is one, `[text]{.cls}` with none stays a
+      span. A defined label with props after it, `[Foo]{.cls}`, is then a link carrying the class, as
+      `[Foo](/foo){.cls}` already is.
+
       Reaching into `__rules__` is the only way to get hold of the original: markdown-it can replace a
       rule by name but has no way to read one back out.
     */
@@ -248,6 +283,15 @@ export class MarkdownRenderer {
       }
       if (silent) {
         return false
+      }
+      if (state.src[state.pos] === '[' && state.env.references) {
+        const labelEnd = state.md.helpers.parseLinkLabel(state, state.pos, true)
+        if (labelEnd >= 0) {
+          const label = state.src.slice(state.pos + 1, labelEnd)
+          if (state.env.references[state.md.utils.normalizeReference(label)]) {
+            return false
+          }
+        }
       }
       return inlineSpan(state, false)
     })
@@ -339,6 +383,42 @@ export class MarkdownRenderer {
     if (config.multimdTable) {
       this.md.utils.assign ??= Object.assign
       this.md.use(mdMultiTable, { multiline: true, rowspan: true, headerless: true })
+
+      /*
+        `markdown-it-attrs` must not see the spans this plugin writes. It has its own span syntax --
+        `| 2 {colspan=2} | 22 | 222 |` -- in which the author writes a cell for EVERY column and the
+        attrs rule hides the ones a span covers. MultiMarkdown writes no cell for a covered column:
+        `| A || B |` is two cells, the empty one already folded into A's `colspan`. Read the attrs
+        way, B is the cell A covers, and it was hidden -- every body-row colspan lost the cells after
+        it, and `| A |||` lost A itself.
+
+        Only these spans can be on a cell when the attrs rule runs: `allowedAttributes` above never
+        lets an author write `colspan` or `rowspan`, so the attrs table patterns have nothing of their
+        own to act on. The spans are lifted off for that one rule and put back after it.
+      */
+      const attrsRule = this.md.core.ruler.__rules__.find(
+        (rule) => rule.name === 'curly_attributes'
+      )
+      const curlyAttributes = attrsRule.fn
+      this.md.core.ruler.at('curly_attributes', (state) => {
+        const spans = []
+        for (const token of state.tokens) {
+          if ((token.type !== 'td_open' && token.type !== 'th_open') || !token.attrs) {
+            continue
+          }
+          for (const name of ['colspan', 'rowspan']) {
+            const value = token.attrGet(name)
+            if (value !== null) {
+              spans.push([token, name, value])
+            }
+          }
+          token.attrs = token.attrs.filter(([name]) => name !== 'colspan' && name !== 'rowspan')
+        }
+        curlyAttributes(state)
+        for (const [token, name, value] of spans) {
+          token.attrSet(name, value)
+        }
+      })
     }
 
     // --------------------------------

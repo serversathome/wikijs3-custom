@@ -52,10 +52,11 @@ import { useRouter } from 'vue-router'
 import { notify } from '@/composables/notify'
 
 import { useEditorStore } from '@/stores/editor'
-import { usePageStore } from '@/stores/page'
+import { isSavedFieldMutation, usePageStore } from '@/stores/page'
 import { useSiteStore } from '@/stores/site'
 import { apiErrorMessage } from '@/helpers/apiError'
 import { tagBrowserRoute } from '@/helpers/tagBrowser'
+import { parseTypedTags } from '@/helpers/tags'
 
 // PROPS
 
@@ -106,8 +107,9 @@ const sortedTags = computed(() => [...state.tags].sort((a, b) => a.localeCompare
 
 // WATCHERS
 
-pageStore.$subscribe(() => {
-  if (props.edit) {
+// -> Not for the edit lock, applied by its own request: see `isSavedFieldMutation`
+pageStore.$subscribe((mutation) => {
+  if (props.edit && isSavedFieldMutation(mutation)) {
     editorStore.$patch({
       lastChangeTimestamp: Temporal.Now.instant()
     })
@@ -145,13 +147,17 @@ watch(
  * Add whatever was typed, as one tag or as several.
  *
  * A comma or a semicolon separates tags, so a list can be pasted in one go. Each new one joins the
- * suggestions too, so re-typing it offers a match rather than looking unknown.
+ * suggestions too, so re-typing it offers a match rather than looking unknown. One the server would
+ * refuse is not added, and the author is told which and why.
  */
 function createTag(val) {
-  const tags = val
-    .split(/[,;]+/)
-    .map((v) => v.trim())
-    .filter(Boolean)
+  const { valid: tags, invalid } = parseTypedTags(val)
+  if (invalid.length > 0) {
+    notify({
+      type: 'negative',
+      message: t('editor.props.tagInvalid', { tags: invalid.join(', ') })
+    })
+  }
   if (tags.length === 0) {
     return
   }
