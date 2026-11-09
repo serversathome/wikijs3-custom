@@ -1,3 +1,31 @@
+<!-- FORK: this section is the fork's own; everything below it is upstream's README -- see FORK.md -->
+> [!NOTE]
+> **This is `wikijs3-custom`, a fork of [Wiki.js 3](https://github.com/requarks/wiki) maintained by [Servers@Home](https://github.com/serversathome).**
+>
+> **Why it exists:** to add features a self-hosted wiki needs that upstream doesn't ship, and to publish a
+> ready-to-run Docker image for them, without drifting away from upstream. It tracks upstream's 3.x
+> releases closely: every new release is merged in (see [Staying current](#staying-current)), and the fork's
+> own code is kept in separate files wherever it can be, so upstream fixes and features keep coming through.
+>
+> **What it adds:**
+> - **Apprise announcements** (Admin → Notifications → Apprise): sends a message to Discord, Slack, Telegram,
+>   ntfy, email or any other [Apprise](https://github.com/caronc/apprise) service when a comment is posted,
+>   an edit is suggested, approved or declined, or an account is created.
+> - **A published Docker image**, `ghcr.io/serversathome/wikijs3-custom`, built from every change to `main`
+>   and versioned from the upstream release it's built on (`3.3.0-fork.1`, `3.3.0-fork.2`, …).
+> - **A ready-to-run Compose file**, [`dev/fork/docker-compose.yml`](dev/fork/docker-compose.yml):
+>   PostgreSQL 17 plus the wiki, with an optional Apprise API server.
+>
+> ```bash
+> docker pull ghcr.io/serversathome/wikijs3-custom:latest
+> ```
+>
+> <a id="staying-current"></a>**Staying current:** a scheduled workflow checks upstream every day and opens a pull
+> request as soon as a new release is tagged. [`FORK.md`](FORK.md) lists every change the fork makes.
+>
+> Everything below is upstream's README. For help with Wiki.js itself, use upstream's links; for anything
+> about the fork's additions, [open an issue here](https://github.com/serversathome/wikijs3-custom/issues).
+
 <div align="center">
 
 <picture>

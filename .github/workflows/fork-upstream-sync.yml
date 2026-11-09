@@ -1,0 +1,188 @@
+# FORK: opens a pull request merging each new upstream 3.x release into main -- see FORK.md.
+#
+# Runs daily. When upstream has tagged a stable 3.x release that main does not contain yet, it merges
+# the tag on a branch of its own, runs the same checks a person would (backend typecheck + lint,
+# frontend build), and opens a pull request with the result. A merge that conflicts opens an issue
+# instead, listing the files and the commands to finish it by hand. Nothing reaches main until the
+# pull request is merged, and that push is what publishes the image (fork-image.yml).
+name: Fork Upstream Sync
+
+on:
+  schedule:
+    - cron: '17 9 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: fork-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge New Upstream Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      UPSTREAM: https://github.com/requarks/wiki.git
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Find New Release
+        id: find
+        run: |
+          git fetch --no-tags "$UPSTREAM" 'refs/tags/3.*:refs/tags/3.*'
+          # -> Stable releases only: a tag with a dash (3.0.0-beta.705) is a pre-release
+          TAG=$(git tag --list '3.*' | grep -v -- '-' | sort -V | tail -n1)
+          echo "Latest upstream release: ${TAG}"
+          BRANCH="upstream-sync/${TAG}"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+          if git merge-base --is-ancestor "$TAG" HEAD; then
+            echo "main already contains ${TAG}."
+            echo "action=none" >> $GITHUB_OUTPUT
+          elif git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null; then
+            echo "${BRANCH} already exists: a pull request for ${TAG} is open or was declined."
+            echo "action=none" >> $GITHUB_OUTPUT
+          elif [[ -n "$(gh issue list --state open --search "in:title \"Merge upstream ${TAG}\"" --json number --jq '.[].number')" ]]; then
+            echo "An open issue already reports a conflicting merge of ${TAG}."
+            echo "action=none" >> $GITHUB_OUTPUT
+          else
+            echo "action=merge" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge
+        id: merge
+        if: steps.find.outputs.action == 'merge'
+        env:
+          TAG: ${{ steps.find.outputs.tag }}
+          BRANCH: ${{ steps.find.outputs.branch }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898281+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          if git merge --no-ff --no-edit -m "Merge upstream release ${TAG}" "$TAG"; then
+            echo "conflicts=false" >> $GITHUB_OUTPUT
+            # -> Keep FORK.md's record of the upstream release the fork is merged up to
+            sed -i -E "s/last merged up to \`[^\`]+\`/last merged up to \`${TAG}\`/" FORK.md
+            if ! git diff --quiet FORK.md; then
+              git commit -q -am "Record the merge of upstream ${TAG} in FORK.md"
+            fi
+          else
+            echo "conflicts=true" >> $GITHUB_OUTPUT
+            git diff --name-only --diff-filter=U > conflicts.txt
+            git merge --abort
+          fi
+
+      - name: Setup Node.js environment
+        if: steps.merge.outputs.conflicts == 'false'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26.x
+
+      - name: Check
+        id: check
+        if: steps.merge.outputs.conflicts == 'false'
+        run: |
+          # -> Every check runs even when an earlier one fails, so the pull request reports all of them
+          result() {
+            if "$@" > "$GITHUB_WORKSPACE/check.log" 2>&1; then
+              echo "- ✅ \`$(basename "$PWD")\`: \`$*\`"
+            else
+              echo "- ❌ \`$(basename "$PWD")\`: \`$*\`"
+              echo
+              echo '  ```'
+              tail -n 20 "$GITHUB_WORKSPACE/check.log" | sed 's/^/  /'
+              echo '  ```'
+              FAILED=1
+            fi
+          }
+          FAILED=0
+          {
+            echo "### Checks"
+            echo
+            cd backend
+            result npm ci --no-audit --no-fund
+            result npm run typecheck
+            result npx oxlint
+            cd ../frontend
+            result npm ci --no-audit --no-fund
+            result npx oxlint
+            result npm run build
+            cd ../blocks
+            result npm ci --no-audit --no-fund
+            result npm run build
+            cd ..
+          } > checks.md
+          cat checks.md
+          echo "failed=${FAILED}" >> $GITHUB_OUTPUT
+
+      - name: Open Pull Request
+        if: steps.merge.outputs.conflicts == 'false'
+        env:
+          TAG: ${{ steps.find.outputs.tag }}
+          BRANCH: ${{ steps.find.outputs.branch }}
+          FAILED: ${{ steps.check.outputs.failed }}
+        run: |
+          git push -u origin "$BRANCH"
+          PREV=$(git describe --tags --abbrev=0 --match '3.*' --exclude '*-*' origin/main)
+          MIGRATIONS=$(git diff --name-only --diff-filter=A "origin/main...${TAG}" -- backend/db/migrations | grep migration.sql | sed -E 's#backend/db/migrations/([^/]+)/.*#- `\1`#' || true)
+          {
+            echo "Merges upstream Wiki.js **${TAG}** into the fork (main is on ${PREV})."
+            echo
+            echo "Upstream releases: https://github.com/requarks/wiki/releases"
+            echo
+            if [[ "$FAILED" == "1" ]]; then
+              echo "> [!WARNING]"
+              echo "> A check failed. Fix it on this branch before merging."
+              echo
+            fi
+            cat checks.md
+            echo
+            echo "### Database migrations"
+            echo
+            if [[ -n "$MIGRATIONS" ]]; then
+              echo "These run on the first boot of the new image. **Back up PostgreSQL before deploying.**"
+              echo
+              echo "$MIGRATIONS"
+            else
+              echo "None."
+            fi
+            echo
+            echo "### Upstream commits"
+            echo
+            git log --no-merges --pretty='- %s (%h)' "origin/main..${TAG}"
+            echo
+            echo "Merging this publishes the image as \`${TAG}-fork.1\`."
+          } > pr.md
+          gh pr create --base main --head "$BRANCH" --title "Merge upstream Wiki.js ${TAG}" --body-file pr.md
+
+      - name: Open Conflict Issue
+        if: steps.merge.outputs.conflicts == 'true'
+        env:
+          TAG: ${{ steps.find.outputs.tag }}
+        run: |
+          {
+            echo "Upstream released **${TAG}**, and merging it into main conflicts in:"
+            echo
+            sed 's/^/- `/; s/$/`/' conflicts.txt
+            echo
+            echo 'Fork code is marked `FORK:` in comments, so each conflict is usually a fork block next to'
+            echo 'an upstream change in the same spot: keep both. To finish it by hand:'
+            echo
+            echo '```bash'
+            echo "git checkout -b upstream-sync/${TAG} origin/main"
+            echo "git fetch --no-tags ${UPSTREAM} 'refs/tags/3.*:refs/tags/3.*'"
+            echo "git merge --no-ff ${TAG}"
+            echo '```'
+            echo
+            echo "Then resolve, run the checks, push the branch and open a pull request. This issue is"
+            echo "not reopened while it stays open; close it once the merge lands."
+          } > issue.md
+          gh issue create --title "Merge upstream ${TAG}: conflicts to resolve" --body-file issue.md
