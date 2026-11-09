@@ -43,6 +43,25 @@ Upstream files touched, one `apprise.emit()` each: `api/comments.ts`, `api/feedb
 in `models/index.ts` and `api/index.ts`, strings in `backend/locales/en.json`, the card in
 `frontend/src/pages/AdminNotifications.vue`, and `apprise` in the Dockerfile's package list.
 
+## Upstream updates
+
+`.github/workflows/fork-upstream-sync.yml` checks upstream every day (and on demand: **Actions → Fork
+Upstream Sync → Run workflow**). When upstream has tagged a stable 3.x release that `main` doesn't
+contain yet, it merges the tag on a branch named `upstream-sync/<tag>`, runs the backend typecheck
+and lint and the frontend and blocks builds, and opens a pull request into `main` that lists the
+check results, the new database migrations and the upstream commits. It also updates the "last merged
+up to" note at the top of this file. Merging the pull request is what publishes the new image.
+
+When the merge conflicts, it opens an issue naming the files and the commands to finish by hand
+instead. A release is tried once: while its branch exists or its conflict issue is open, the workflow leaves it
+alone, so delete the branch (or close the issue) to have it try that release again.
+
+GitHub only lets the workflow open pull requests when **Settings → Actions → General → Workflow
+permissions → Allow GitHub Actions to create and approve pull requests** is ticked.
+Pull requests it opens don't trigger other workflows, which is why it runs the checks itself.
+
+The README's note at the top is the fork's; the rest of the README is upstream's.
+
 ## Docker image
 
 `.github/workflows/fork-image.yml` builds `dev/build/Dockerfile` and publishes it to
