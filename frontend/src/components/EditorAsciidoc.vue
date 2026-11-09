@@ -352,10 +352,11 @@ import {
 import { dialog } from '@/composables/dialog'
 import { useEditorPanes } from '@/composables/editorPanes'
 import { usePreviewScrollSync } from '@/composables/previewScrollSync'
+import { useBlockFolding } from '@/composables/blockFolding'
 import { useImagePropertiesLens } from '@/composables/imagePropertiesLens'
 import { notify } from '@/composables/notify'
 import { assetPath } from '@/helpers/assets'
-import { blockAsciidoc } from '@/helpers/blocks'
+import { blockAsciidoc, isCanvasBlock } from '@/helpers/blocks'
 import {
   blockAttributeContext,
   blockNameContext,
@@ -363,6 +364,7 @@ import {
   blockSnippet,
   blockValues,
   findBlockContent,
+  findBlockRegions,
   findBlocks,
   findTabsets,
   writeBlockContent
@@ -383,6 +385,7 @@ import { useSiteStore } from '@/stores/site'
 import { useUserStore } from '@/stores/user'
 
 import { enhanceRenderedContent } from '@/helpers/renderedContent'
+import { renderPermissionsOf, sanitizeRender } from '@/helpers/sanitizeRender'
 
 import { debounce } from 'es-toolkit/function'
 import * as monaco from 'monaco-editor'
@@ -473,6 +476,14 @@ const HEADER_ICONS = [
   'mdi:format-header-5',
   'mdi:format-header-6'
 ]
+
+/** Every block foldable from the gutter, a drawing folded from the start. See `useBlockFolding`. */
+const blockFolding = useBlockFolding({
+  getEditor: () => editor,
+  languageId: ASCIIDOC_LANGUAGE_ID,
+  findBlockRegions,
+  blockDefinition
+})
 
 /** The "Image Properties" lens, over every image in the source. See `useImagePropertiesLens`. */
 const imageLens = useImagePropertiesLens({
@@ -712,9 +723,27 @@ function insertBlockClb(source) {
     inserted. Two lines below the cursor when it had to break out of a sentence first; otherwise on
     the cursor's own line, starting at the cursor's own column.
   */
-  return {
+  const start = {
     lineNumber: position.lineNumber + (before ? 2 : 0),
     column: before ? 1 : position.column
+  }
+  editInsertedCanvas(start.lineNumber)
+  return start
+}
+
+/**
+ * "Edit Content" on a block that has just been inserted, when its body is a drawing -- see
+ * `isCanvasBlock`. Its starter body is an empty diagram, so the canvas is where the author was going.
+ *
+ * Found by its opening line, which is where `insertBlockClb` says the markup began; a block that line
+ * does not open (one inserted after indentation, which is not a block at all) is left alone. After a
+ * tick, because the picker that inserted it closes itself straight after -- and closing is setting
+ * the overlay to nothing, which would close this one too if it were already open.
+ */
+function editInsertedCanvas(line) {
+  const found = findBlocks(editor.getModel().getValue()).find((entry) => entry.line === line)
+  if (found && isCanvasBlock(blockDefinition(found.block))) {
+    nextTick(() => editBlockContent(found.line, found.block))
   }
 }
 
@@ -840,7 +869,10 @@ function replaceBlockContentClb({ source, replace }) {
       text: writeBlockContent(replace, source)
     }
   ])
-  editor.setPosition(new Position(replace.startLine, 1))
+  // -> A drawing folds back up, the caret on its opening line -- see `refoldCanvasBlock`
+  if (!blockFolding.refoldCanvasBlock(replace.startLine)) {
+    editor.setPosition(new Position(replace.startLine, 1))
+  }
   editor.focus()
 }
 
@@ -1136,7 +1168,7 @@ async function loadSiteBlocks() {
       siteBlocks.filter((block) => !block.isEnabled).map((block) => `block-${block.block}`)
     )
   } catch (err) {
-    // -> Left empty, which draws everything as it did before; see the same note in `EditorMarkdown.vue`
+    // -> Left empty, which strips every block from the preview; see the same note in `EditorMarkdown.vue`
     console.warn(`Could not read which blocks this site has enabled: ${err.message}`)
   }
 }
@@ -1268,7 +1300,19 @@ async function processContent(newContent) {
     (el) => el.active ?? 0
   )
 
-  pageStore.setRender(rendered.html)
+  /*
+    Sanitized before it reaches the screen: Asciidoctor's secure mode refuses to read files, but a
+    passthrough (`++++`, `pass:[]`) still hands the author's HTML through untouched, and this is
+    rendered in THIS session -- see `sanitizeRender`. Against what this session may embed on the page,
+    which is also what saving it would keep.
+  */
+  pageStore.setRender(
+    sanitizeRender(rendered.html, {
+      permissions: renderPermissionsOf(userStore.pagePermissions),
+      blocks: siteBlocks,
+      blobImages: true
+    })
+  )
   headings.value = rendered.headings
   await nextTick()
   // -> With the preview pane closed there is no DOM to attend to. The render is stored either way, so
@@ -1450,6 +1494,8 @@ function restoreEditorContent({ content }) {
   editor.executeEdits('restore', [{ range: model.getFullModelRange(), text: content ?? '' }])
   editor.pushUndoStop()
   syncContentToStore.flush()
+  // -> A whole page put back is a page opened again, and the edit over all of it unfolded everything
+  blockFolding.foldCanvasBlocks()
 }
 
 // MOUNTED
@@ -1556,6 +1602,10 @@ onMounted(async () => {
 
   // -> "Image Properties" over every image in the page -- see `useImagePropertiesLens`
   imageLens.register()
+
+  // -> Blocks fold down to their two fences, a drawing's XML from the start -- see `useBlockFolding`
+  blockFolding.register()
+  blockFolding.foldCanvasBlocks()
 
   // -> Define Formatting Actions
   editor.addAction({
@@ -1682,6 +1732,8 @@ onMounted(async () => {
             if (!isCollabActive()) {
               return
             }
+            // -> The binding has just replaced the text with the room's, and unfolded it with that
+            blockFolding.foldCanvasBlocks()
           }
           /*
             Holding the room's document now, or carrying on as a plain editor without one -- and the
@@ -1751,6 +1803,7 @@ onBeforeUnmount(() => {
   blockLensProvider?.dispose()
   blockCompletions.dispose()
   imageLens.dispose()
+  blockFolding.dispose()
   // -> Before the editor goes: the binding is holding the model, and leaving the room is what takes
   //    this author's avatar out of everyone else's header
   stopCollabSession()

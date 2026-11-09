@@ -10,7 +10,7 @@ import { MarkdownRenderer } from '@/renderers/markdown'
 import { collabPlugins, collabRedo, collabUndo, seedIfEmpty } from './collab'
 import { buildInputRules, buildKeymap, taskCheckboxes } from './commands'
 import { imageBar } from './images'
-import { linkBar } from './links'
+import { linkBar, linkTrigger } from './links'
 import { createNodeViews } from './nodeviews'
 import { createParser } from './parse'
 import { schema } from './schema'
@@ -61,6 +61,10 @@ export function createVisualEditor({
     A block's body is rendered through the same pipeline, on its own: the block reads its source out
     of the markup it is handed, so a diagram's fence has to arrive as the `<pre>` the renderer makes
     of it rather than as raw text.
+
+    Raw, and not to be put on screen as it is: the markdown is whatever its author wrote -- or a
+    collaborator, arriving through the shared document. The block's view puts it inside the element
+    and sanitizes the two together (`context.sanitize`), as `getRender` below does the whole page.
   */
   context.renderMarkdown = (markdown) => render(markdown)
 
@@ -94,6 +98,8 @@ export function createVisualEditor({
       getItems: () => context.slashItems(),
       t: context.t
     }),
+    // -> `[[` opens the link picker -- see `links.js`
+    linkTrigger({ onTrigger: () => context.insertLinkFromBrackets() }),
     buildInputRules(),
     keymap(buildKeymap({ collab: isCollab })),
     gapCursor(),
@@ -166,7 +172,7 @@ export function createVisualEditor({
     getMarkdown: () => serialize(view.state.doc),
 
     /** The render of that source, which is what a save stores as the page's HTML. */
-    getRender: () => render(serialize(view.state.doc)),
+    getRender: () => context.sanitize(render(serialize(view.state.doc))),
 
     /**
      * Undo and redo, as the document currently means them.

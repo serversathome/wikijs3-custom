@@ -6,7 +6,9 @@
           <w-btn dense flat to="/">
             <w-avatar size="34px" square><img src="/_assets/logo-wikijs.svg" /></w-avatar>
           </w-btn>
-          <w-toolbar-title>Wiki.js</w-toolbar-title>
+          <!-- -> Same cell as the site title in `HeaderNav`, so the name does not shift sideways when
+                  moving between the admin and the site -->
+          <div class="text-h6 ml-2 min-w-0 flex-1 truncate">Wiki.js</div>
         </w-toolbar>
         <w-toolbar class="max-md:hidden justify-center" style="height: 64px">
           <div class="text-overline uppercase text-grey">{{ t('admin.adminArea') }}</div>
@@ -528,6 +530,10 @@ const overlays = {
     loader: () => import('../components/GroupEditOverlay.vue'),
     loadingComponent: LoadingGeneric
   }),
+  ImportHedgedocOverlay: defineAsyncComponent({
+    loader: () => import('../components/ImportHedgedocOverlay.vue'),
+    loadingComponent: LoadingGeneric
+  }),
   ImportWikijs2Overlay: defineAsyncComponent({
     loader: () => import('../components/ImportWikijs2Overlay.vue'),
     loadingComponent: LoadingGeneric
@@ -740,16 +746,6 @@ watch(
   { immediate: true }
 )
 watch(
-  () => adminStore.sites,
-  (newValue) => {
-    if (adminStore.currentSiteId === null && newValue.length > 0) {
-      adminStore.$patch({
-        currentSiteId: siteStore.id
-      })
-    }
-  }
-)
-watch(
   () => adminStore.currentSiteId,
   (newValue) => {
     // -> Only a route that HAS a site in its path follows the selection; on one without (the dashboard)
@@ -773,12 +769,14 @@ onMounted(async () => {
   }
 
   adminStore.fetchLocales()
-  await adminStore.fetchSites()
+  // -> The site in the URL is the selection, so it has to be in place BEFORE the list arrives: a
+  //    selection made by `fetchSites` would be pushed into the route and overwrite the one asked for
   if (route.params.siteid) {
     adminStore.$patch({
       currentSiteId: route.params.siteid
     })
   }
+  await adminStore.fetchSites()
   adminStore.fetchInfo()
   // -> Only for a role that can see the Storage item at all; anyone else would be asking for a 403
   if (adminStore.currentSiteId && userStore.can('manage:storage')) {

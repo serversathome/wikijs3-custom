@@ -52,9 +52,9 @@ document is whether the client will run the app, and each has its own function:
   from the page's locale group, and the `og:`/`twitter:` pair — which is what a link pasted into
   Slack or Discord reads, and the surface this was most visibly missing.
 - **The body is the stored render with everything that would *run* taken out** — `<script>`,
-  `<style>`, inline handlers (`stripActiveMarkup`). A page whose author holds `write:scripts` keeps
-  those in its render and the app runs them when it draws the page; a copy of the same markup in the
-  document as the browser parses it would run them a second time, before the app exists. Not a
+  `<style>`, inline handlers (`stripActiveMarkup`). A page whose author holds `write:styles` keeps
+  its `<style>` in its render and the app applies it when it draws the page; a copy of the same markup
+  in the document as the browser parses it would apply it a second time, before the app exists. Not a
   sanitizer — the render was sanitized at save time — just the same markup with less in it.
 - **Two blocks are written out as the lists they draw** (`expandLinkBlocks`), because their whole
   content is links and the stored render holds none of them: `block-index` (an empty element — its
@@ -67,7 +67,9 @@ document is whether the client will run the app, and each has its own function:
   Tailwind's preflight took away and is deliberately not a copy of the content styles, which belong
   to elements the app draws. Inside it, `prerenderFor` puts a `<header>` (logo and site title, linking
   home, on a plain black bar) over a `<main>` carrying the page's `lang` and `dir` — the header is the
-  site's, not the page's, so the language goes on `<main>` alone.
+  site's, not the page's, so the language goes on `<main>` alone. `<main>` opens with a `<header>` of
+  its own holding the page's title as an `<h1>` and its description, as the app's page header shows
+  them; the stored render carries neither.
 - **An anonymous request to a page path with nothing public at it answers 404**, where the shell used
   to answer 200 everywhere — which is what taught a crawler that every URL on the wiki exists. No
   page, an unpublished one and one the guests group's rules refuse are one answer, since the

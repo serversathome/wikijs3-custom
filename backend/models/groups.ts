@@ -1,9 +1,20 @@
 import { v4 as uuid } from 'uuid'
 import { and, count, eq, ilike, inArray, ne, or, sql } from 'drizzle-orm'
-import { groups as groupsTable, userGroups, users as usersTable } from '../db/schema.ts'
+import {
+  authentication as authenticationTable,
+  groups as groupsTable,
+  userGroups,
+  users as usersTable
+} from '../db/schema.ts'
 import { invalidateAppShellCache } from '../helpers/appShell.ts'
 import { CustomError, isNoteImagesPath } from '../helpers/common.ts'
-import { resolveLocaleRule, resolvePageRule, type RulePageRef } from '../helpers/pageRules.ts'
+import {
+  normalizeRulePath,
+  resolveLocaleRule,
+  resolvePageRule,
+  ruleIsScopedTo,
+  type RulePageRef
+} from '../helpers/pageRules.ts'
 import type { SystemIds } from './types.ts'
 import type { FastifyRequest } from 'fastify'
 
@@ -185,6 +196,8 @@ export interface GroupWithUserCount {
   redirectOnLogin: string
   redirectOnFirstLogin: string
   redirectOnLogout: string
+  /** Whether every member must sign in with two-factor authentication. */
+  tfaRequired: boolean
   isSystem: boolean
   /** Whether a SCIM client owns this group, which is what the admin list badges. */
   isProvisioned: boolean
@@ -199,6 +212,7 @@ export interface GroupPatch {
   redirectOnLogin?: string
   redirectOnFirstLogin?: string
   redirectOnLogout?: string
+  tfaRequired?: boolean
   permissions?: string[]
   rules?: GroupRule[]
   /** SCIM's bookkeeping; see the same two fields on `UserPatch`. */
@@ -248,6 +262,7 @@ const groupSelection = {
   redirectOnLogin: groupsTable.redirectOnLogin,
   redirectOnFirstLogin: groupsTable.redirectOnFirstLogin,
   redirectOnLogout: groupsTable.redirectOnLogout,
+  tfaRequired: groupsTable.tfaRequired,
   isSystem: groupsTable.isSystem,
   isProvisioned: groupsTable.isProvisioned,
   createdAt: groupsTable.createdAt,
@@ -459,13 +474,19 @@ class Groups {
    * field offers -- has to know, since that request names no page of its own.
    *
    * A `DENY` rule is not a grant, so a set of rules that only ever denies answers false.
+   *
+   * Given a `siteId`, only the rules scoped to that site count -- "anywhere on this site", in any of
+   * its locales. Without one, a rule limited to some other site counts as well.
    */
-  grantsAnywhere(actor: AccessActor, permission: string): boolean {
+  grantsAnywhere(actor: AccessActor, permission: string, siteId?: string): boolean {
     if (actor.permissions.includes('manage:system')) {
       return true
     }
     return this.rulesForGroups(actor.groupIds).some(
-      (rule) => rule.mode !== 'DENY' && (rule.roles ?? []).includes(permission)
+      (rule) =>
+        rule.mode !== 'DENY' &&
+        (rule.roles ?? []).includes(permission) &&
+        (siteId === undefined || ruleIsScopedTo(rule, { siteId }))
     )
   }
   async init(ids: SystemIds): Promise<void> {
@@ -767,7 +788,8 @@ class Groups {
   }
 
   /**
-   * Tidy the tags on the rules being saved: trimmed, lowercased, de-duplicated, blanks dropped.
+   * Tidy the rules being saved: each path spelled as the page paths it is compared against are
+   * (`normalizeRulePath`), and the tags trimmed, lowercased, de-duplicated, blanks dropped.
    *
    * Done on the way in rather than at match time so that the stored rule says exactly what it
    * matches. `ruleTags` lowercases anyway — a rule written through the API keeps working either
@@ -786,6 +808,7 @@ class Groups {
       ...patch,
       rules: patch.rules.map((rule) => ({
         ...rule,
+        path: normalizeRulePath(rule.match, rule.path),
         tags: [...new Set((rule.tags ?? []).map((tag) => tag.trim().toLowerCase()).filter(Boolean))]
       }))
     }
@@ -827,13 +850,25 @@ class Groups {
    * sessions are ended, since each still carries the group's permissions — see
    * `sessions.refreshAccess`.
    *
+   * The group is also taken out of every strategy's `autoEnrollGroups`, which is a uuid array that no
+   * foreign key reaches. Left there, the id has no option in the strategy's Assign To picker to be
+   * unselected by, and `authentication.validateStrategy` refuses every later save of that strategy.
+   *
    * @param id Group ID
    * @param req The request making the change, whose own session is kept
    * @returns Whether a group was deleted
    */
   async deleteGroup(id: string, req?: FastifyRequest): Promise<boolean> {
     const members = await this.memberIds(id)
-    const result = await WIKI.db.delete(groupsTable).where(eq(groupsTable.id, id))
+    const result = await WIKI.db.transaction(async (tx) => {
+      await tx
+        .update(authenticationTable)
+        .set({
+          autoEnrollGroups: sql`array_remove(${authenticationTable.autoEnrollGroups}, ${id}::uuid)`
+        })
+        .where(sql`${id}::uuid = ANY(${authenticationTable.autoEnrollGroups})`)
+      return tx.delete(groupsTable).where(eq(groupsTable.id, id))
+    })
     await this.reloadCache()
     await WIKI.models.sessions.refreshAccess(members, req)
     return (result.rowCount ?? 0) > 0

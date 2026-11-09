@@ -5,6 +5,7 @@ import {
   maySeeUnpublished,
   maySeeUnpublishedAnywhere
 } from '../helpers/publishing.ts'
+import { toTsQueryText } from '../helpers/searchQuery.ts'
 import type { AccessActor } from './groups.ts'
 
 /**
@@ -52,6 +53,19 @@ export const FALLBACK_DICTIONARY = 'simple'
 export interface SearchConfig {
   termHighlighting: boolean
   dictOverrides: Record<string, string>
+}
+
+/** One entry of the mapping in force, for the admin area to show how a locale will be indexed. */
+export interface DictionaryMapping {
+  /** A language (`pt`) or a regional locale (`pt-BR`), as the mapping is keyed */
+  locale: string
+  /** What the entry names, which is what indexes the locale when `installed` */
+  dictionary: string
+  source: 'builtin' | 'override'
+  /** The built-in an override replaces, when the language has one */
+  builtin: string | null
+  /** False when postgres does not have it, in which case the locale is indexed with the fallback */
+  installed: boolean
 }
 
 /** What a rebuild did, per locale, so the caller can report something concrete. */
@@ -200,6 +214,14 @@ const SUGGEST_CANDIDATES = 200
 const HL_START = '\u0002'
 const HL_STOP = '\u0003'
 
+/**
+ * A text search configuration name as a `regconfig` value, bound as a parameter rather than spliced
+ * into the SQL — a name can be schema-qualified or quoted (see `getAvailableDictionaries`).
+ */
+function regconfig(name: string): SQL {
+  return sql`${name}::regconfig`
+}
+
 /** Escape the LIKE wildcards, so that what was typed is matched as text rather than as a pattern. */
 function escapeLike(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')
@@ -233,14 +255,24 @@ class Search {
   }
 
   /**
-   * The text search configurations this postgres actually has, e.g. `english`, `simple`.
+   * The text search configurations this postgres actually has, e.g. `english`, `simple`, each named
+   * the way this connection has to write it to reach it.
    *
    * Used to validate what an operator maps a locale to: a name postgres does not know would make
    * every `to_tsvector` call fail at rebuild time, long after the setting was saved.
+   *
+   * `oid::regconfig::text` rather than `cfgname`, because a bare `cfgname` is not necessarily a name
+   * that resolves. The wiki connects with its own schema as the whole `search_path`, while a config
+   * an operator adds for an extra parser (zhparser for Chinese, say) is usually created in `public`
+   * — listed under its bare name it passed validation and then failed every `to_tsvector` and every
+   * search on the site. The regconfig output form schema-qualifies a name that is not on the path
+   * (`public.chinese`) and quotes one that needs it, so every entry here resolves as written.
    */
   async getAvailableDictionaries(): Promise<string[]> {
-    const rows = await WIKI.db.execute(sql`SELECT cfgname FROM pg_ts_config ORDER BY cfgname`)
-    return (rows.rows ?? rows).map((r: any) => r.cfgname as string)
+    const rows = await WIKI.db.execute(
+      sql`SELECT oid::regconfig::text AS name FROM pg_ts_config ORDER BY 1`
+    )
+    return (rows.rows ?? rows).map((r: any) => r.name as string)
   }
 
   /**
@@ -266,6 +298,33 @@ class Search {
   }
 
   /**
+   * Every entry of the mapping in force — the built-in defaults with the operator's overrides laid
+   * over them — one per key, as `dictionaryForLocale` looks them up.
+   *
+   * Says nothing it does not have to work out: an entry whose dictionary is missing is reported as
+   * such rather than resolved to the fallback, so the admin area can say why a language is not being
+   * stemmed. Unlike `dictionaryForLocale` it logs nothing, since nothing is being indexed.
+   *
+   * @param available Dictionary names postgres knows
+   */
+  effectiveMappings(available: string[]): DictionaryMapping[] {
+    const { dictOverrides } = this.getConfig()
+    const keys = uniq([...Object.keys(DEFAULT_DICTIONARIES), ...Object.keys(dictOverrides)]).sort()
+    return keys.map((locale) => {
+      const builtin = DEFAULT_DICTIONARIES[locale] ?? null
+      const override = dictOverrides[locale]
+      const dictionary = override ?? (builtin as string)
+      return {
+        locale,
+        dictionary,
+        source: override ? 'override' : 'builtin',
+        builtin,
+        installed: available.includes(dictionary)
+      }
+    })
+  }
+
+  /**
    * A SQL expression giving the text search dictionary to use for each row.
    *
    * The vector on a page was built with its own locale's dictionary, so the query has to be parsed
@@ -278,14 +337,12 @@ class Search {
   private dictionaryExpression(locales: string[], available: string[]) {
     const arms = locales.map((locale) => {
       const dictionary = this.dictionaryForLocale(locale, available)
-      // -> Both sides are checked values: the locale is compared as a parameter, and the dictionary
-      //    name is one postgres itself reported
-      return sql`WHEN ${locale} THEN ${sql.raw(`'${dictionary}'`)}`
+      return sql`WHEN ${locale} THEN ${regconfig(dictionary)}`
     })
     if (arms.length < 1) {
-      return sql`${sql.raw(`'${FALLBACK_DICTIONARY}'`)}::regconfig`
+      return regconfig(FALLBACK_DICTIONARY)
     }
-    return sql`(CASE p.locale ${sql.join(arms, sql` `)} ELSE ${sql.raw(`'${FALLBACK_DICTIONARY}'`)} END)::regconfig`
+    return sql`(CASE p.locale ${sql.join(arms, sql` `)} ELSE ${regconfig(FALLBACK_DICTIONARY)} END)`
   }
 
   /**
@@ -295,10 +352,10 @@ class Search {
    * Parsed with the dictionary the locale's pages were indexed with, as `searchPages` does it. One
    * locale means one dictionary, so there is no CASE to build.
    *
-   * @param match `all` reads the terms the way the search box does (`websearch_to_tsquery`); `any`
+   * @param match `all` reads the terms the way the search box does (`toTsQueryText`); `any`
    *   ORs the words instead, for a query whose words need not all be there — two people rarely
    *   describe the same idea in the same words. Quotes and a leading `-` are dropped first, since
-   *   they mean something to the websearch syntax and nothing to a list of words.
+   *   they mean something to the search syntax and nothing to a list of words.
    */
   async tsQueryFor(locale: string, terms: string, match: 'all' | 'any' = 'all'): Promise<SQL> {
     const dictionary = this.dictionaryForLocale(locale, await this.getAvailableDictionaries())
@@ -310,7 +367,7 @@ class Search {
             .filter((word) => word.length > 0 && word.toLowerCase() !== 'or')
             .join(' or ')
         : terms
-    return sql`websearch_to_tsquery(${sql.raw(`'${dictionary}'`)}::regconfig, ${text})`
+    return sql`to_tsquery(${regconfig(dictionary)}, ${toTsQueryText(text)})`
   }
 
   /**
@@ -357,7 +414,7 @@ class Search {
     const dict = hasQuery
       ? this.dictionaryExpression(searchedLocales, await this.getAvailableDictionaries())
       : this.dictionaryExpression([], [])
-    const tsQuery = sql`websearch_to_tsquery(${dict}, ${terms})`
+    const tsQuery = sql`to_tsquery(${dict}, ${toTsQueryText(terms)})`
 
     const conditions = [sql`p."siteId" = ${siteId}`, sql`p."isSearchable" = true`]
     if (hasQuery) {
@@ -747,13 +804,12 @@ class Search {
 
     for (const locale of locales) {
       const dictionary = this.dictionaryForLocale(locale, available)
-      // -> The dictionary name is an identifier in `to_tsvector`, and it is only ever one of the
-      //    names postgres itself reported, so it cannot carry anything unexpected
+      const dict = regconfig(dictionary)
       const updated = await WIKI.db.execute(sql`
         UPDATE pages SET ts =
-          setweight(to_tsvector(${sql.raw(`'${dictionary}'`)}, coalesce(title, '')), 'A') ||
-          setweight(to_tsvector(${sql.raw(`'${dictionary}'`)}, coalesce(description, '')), 'B') ||
-          setweight(to_tsvector(${sql.raw(`'${dictionary}'`)}, coalesce("searchContent", '')), 'C')
+          setweight(to_tsvector(${dict}, coalesce(title, '')), 'A') ||
+          setweight(to_tsvector(${dict}, coalesce(description, '')), 'B') ||
+          setweight(to_tsvector(${dict}, coalesce("searchContent", '')), 'C')
         WHERE locale = ${locale}
       `)
       const pages = updated.rowCount ?? 0
@@ -779,10 +835,9 @@ class Search {
    */
   async indexPage(id: string, locale: string): Promise<void> {
     try {
-      const dictionary = this.dictionaryForLocale(locale, await this.getAvailableDictionaries())
-      // -> The dictionary name is an identifier in `to_tsvector`, and it is only ever one of the
-      //    names postgres itself reported, so it cannot carry anything unexpected
-      const dict = sql.raw(`'${dictionary}'`)
+      const dict = regconfig(
+        this.dictionaryForLocale(locale, await this.getAvailableDictionaries())
+      )
       await WIKI.db.execute(sql`
         UPDATE pages SET ts =
           setweight(to_tsvector(${dict}, coalesce(title, '')), 'A') ||

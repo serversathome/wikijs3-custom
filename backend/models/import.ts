@@ -21,6 +21,7 @@ import {
   dataPathRoot,
   decodeTreePath,
   decodeUrlPath,
+  isNavLinkTarget,
   isPageUrl,
   isRedirectTarget,
   normalizeFolderPath,
@@ -28,7 +29,8 @@ import {
   normalizePagePath,
   splitLocalePath
 } from '../helpers/common.ts'
-import { htmlToMarkdown } from '../helpers/htmlToMarkdown.ts'
+import { htmlToMarkdown, type ConversionLosses } from '../helpers/htmlToMarkdown.ts'
+import { normalizeRulePath } from '../helpers/pageRules.ts'
 import { rewriteSourceLinks, sourceLinkHrefs } from '../helpers/linkRewrite.ts'
 import { sanitizeFileName } from './assets.ts'
 import { SOURCE_SYNTAX } from './pages.ts'
@@ -192,6 +194,9 @@ const EDITOR_MAP: Record<string, string> = {
  */
 const V2_VISUAL_EDITOR = 'ckeditor'
 
+/** How many pages the line about formatting dropped from code names before it counts the rest. */
+const CODE_FORMATTING_LISTED = 20
+
 /** Why a page changed editor, for the one line per kind the log gets about it. */
 const EDITOR_CHANGE_NOTES: Record<string, Record<string, string>> = {
   ckeditor: {
@@ -268,8 +273,13 @@ const V2_ICON_CLASS = 'align-abstopright'
  *
  * The size suffix is `markdown-it-imsize`, which both versions use, so the URL is only the first
  * token inside the parentheses.
+ *
+ * Whatever follows the URL has to begin with whitespace. Without that the URL and the rest of the
+ * parentheses could each take the same characters, and an image NOT followed by an attribute block
+ * is retried at every split of its URL — quadratic in its length, so a base64 `data:` screenshot of
+ * a megabyte held the import for minutes on one page, and the whole server with it.
  */
-const MD_IMAGE_WITH_ATTRS = /!\[[^\]]*\]\(\s*([^)\s]+)[^)]*\)\{([^}]*)\}/
+const MD_IMAGE_WITH_ATTRS = /!\[[^\]]*\]\(\s*([^)\s]+)(?:\s[^)]*)?\)\{([^}]*)\}/
 
 /** The same thing written as HTML, which is what a 2.x ckeditor or code page holds. */
 const HTML_IMAGE = /<img\b[^>]*>/i
@@ -329,14 +339,30 @@ function stringOf(value: unknown, fallback = ''): string {
 }
 
 /**
+ * What 2.x allowed in a path that a path here may not hold at all: anything but a letter, a mark, a
+ * number, and the separators `normalizeNewPagePath` already folds into a hyphen (whitespace, `_`,
+ * `-`) or splits on (`/`). A dot is the common case — `v1.2` — but 2.x took `&`, `+`, `'`, `,`, `!`
+ * and the like as well, and a page whose path kept one was refused outright by `createPage`.
+ */
+const V2_PATH_PUNCTUATION = /[^\p{L}\p{M}\p{N}\s_/-]/gu
+
+/**
+ * A 2.x path with every character a path here may not hold turned into a hyphen, and nothing else
+ * changed — what `adoptStoredPage` is handed, since it does the rest of a path's normalization itself.
+ */
+function v2PathSpelling(value: string): string {
+  return value.replaceAll(V2_PATH_PUNCTUATION, '-')
+}
+
+/**
  * One 2.x path segment — of a page or a folder, never a file name — as this wiki writes it.
  *
- * `normalizeNewPagePath`, plus the one thing 2.x allowed in a path that a path here may not hold at
- * all: a dot, which becomes a hyphen like every other separator, so `v1.2` is `v1-2`. A file name
- * keeps its dot, since that is its extension; `sanitizeFileName` is that one's rule.
+ * `normalizeNewPagePath`, after every character a path here may not hold at all has become a hyphen
+ * like every other separator, so `v1.2` is `v1-2` and `a&b_page` is `a-b-page`. A file name keeps its
+ * dot, since that is its extension; `sanitizeFileName` is that one's rule.
  */
 function segmentOf(segment: string): string {
-  return normalizeNewPagePath(segment.replaceAll('.', '-'))
+  return normalizeNewPagePath(v2PathSpelling(segment))
 }
 
 /** A 2.x page path as this wiki writes one. See `segmentOf`. */
@@ -1292,7 +1318,7 @@ class Import {
         match,
         // -> 2.x has no FORCEALLOW; `deny` is the whole of what it could say
         mode: entry?.deny === true ? 'DENY' : 'ALLOW',
-        path: stringOf(entry?.path),
+        path: normalizeRulePath(match, stringOf(entry?.path)),
         tags: (Array.isArray(entry?.tags) ? entry.tags : []).map((tag: unknown) => stringOf(tag)),
         locales: (Array.isArray(entry?.locales) ? entry.locales : []).map((code: unknown) =>
           stringOf(code)
@@ -1773,6 +1799,8 @@ class Import {
     let imported = 0
     let skipped = 0
     let icons = 0
+    /** Page path → the formatting its conversion dropped from inside code. */
+    const codeFormattingLost = new Map<string, Set<string>>()
     /** Source editor → how many pages of it changed editor on the way in. */
     const converted = new Map<string, number>()
     const convertHtml = session.htmlConversion !== 'html'
@@ -1821,7 +1849,8 @@ class Import {
         corner image with a CSS class, and a class is exactly what does not survive the trip to
         markdown. Extracting first means the icon is found on the HTML that still carries it.
       */
-      const source = editor === 'visual' ? htmlToMarkdown(body) : body
+      const losses: ConversionLosses = { codeFormatting: new Set() }
+      const source = editor === 'visual' ? htmlToMarkdown(body, losses) : body
 
       try {
         const authorId = await this.#authorFor(session, record?.authorId)
@@ -1831,11 +1860,12 @@ class Import {
             siteId: target.siteId,
             locale,
             /*
-              Only the dots are converted here. Everything else a path written today changes is done
-              by `adoptStoredPage` itself, which also finds a page imported before those rules under
-              the spelling it was given then, rather than writing a second copy beside it.
+              Only what a path may not hold at all is converted here (`v2PathSpelling`). Everything
+              else a path written today changes is done by `adoptStoredPage` itself, which also finds
+              a page imported before those rules under the spelling it was given then, rather than
+              writing a second copy beside it.
             */
-            path: pagePath.replaceAll('.', '-'),
+            path: v2PathSpelling(pagePath),
             title: stringOf(record?.title, pagePath),
             description: stringOf(record?.description),
             editor,
@@ -1877,9 +1907,15 @@ class Import {
         await this.#remember(session.id, 'writtenPage', [
           { sourceId: record?.id, targetId: page.id }
         ])
+        if (losses.codeFormatting.size > 0) {
+          codeFormattingLost.set(pagePath, losses.codeFormatting)
+        }
         imported++
       } catch (err: any) {
         warnings.push(`"${pagePath}" could not be imported: ${err.message}`)
+        // -> The import log lives in one browser tab and the session's copy is capped, so a page that
+        //    did not make it is also in the server log, where it is looked for afterwards
+        WIKI.logger.warn(`Import: page "${pagePath}" could not be imported: ${err.message}`)
         skipped++
       }
     }
@@ -1888,6 +1924,21 @@ class Import {
         EDITOR_CHANGE_NOTES[sourceEditor]?.[targetEditorFor(sourceEditor, convertHtml)] ??
         '3.x does not have that editor, so they were imported as markdown.'
       warnings.push(`${count} pages were written with the 2.x "${sourceEditor}" editor. ${note}`)
+    }
+    /*
+      One line per batch, naming the pages: what was lost is formatting rather than text, so it is
+      worth a look at each of them, but a line apiece would take the log's two hundred to themselves
+      on a wiki that styled its code a lot. Only the pages: a history version converted the same way
+      lost the same kind of thing, and the page is where somebody will go to check.
+    */
+    if (codeFormattingLost.size > 0) {
+      const listed = [...codeFormattingLost]
+        .slice(0, CODE_FORMATTING_LISTED)
+        .map(([path, kinds]) => `"${path}" (${[...kinds].join(', ')})`)
+      const more = codeFormattingLost.size - listed.length
+      warnings.push(
+        `${codeFormattingLost.size} pages had formatting inside code, which markdown cannot hold there; the text was kept and the formatting dropped: ${listed.join(', ')}${more > 0 ? ` and ${more} more` : ''}.`
+      )
     }
     if (icons > 0) {
       warnings.push(
@@ -2570,6 +2621,14 @@ class Import {
       const targetType = stringOf(entry?.targetType, 'page')
       const isExternal = targetType === 'external' || targetType === 'externalblank'
       const target = stringOf(entry?.target)
+      // -> 2.x stored a target verbatim, so an export may carry a `javascript:` one; see
+      //    `isNavLinkTarget` for why the sidebar must not draw it
+      if (target && !isNavLinkTarget(target)) {
+        warnings.push(
+          `The sidebar item "${stringOf(entry?.label)}" was skipped: its target is not a path or an http(s) or mailto: address.`
+        )
+        continue
+      }
       items.push({
         id: uuidv5(`nav:${stringOf(entry?.id)}`, session.namespace),
         type,

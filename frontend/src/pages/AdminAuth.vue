@@ -293,10 +293,14 @@
             <!-- ----------------------- -->
             <w-card class="pb-2 mt-4">
               <w-card-header>{{ t('admin.auth.strategyConfiguration') }}</w-card-header>
-              <w-card-section>
+              <!--
+                The condition belongs on the section, not on the banner inside it: a section is a
+                padded band whether or not anything renders in it, so leaving it unconditional put
+                32px of empty space between the header and the first setting.
+              -->
+              <w-card-section
+                v-if="!state.strategy.config || Object.keys(state.strategy.config).length < 1">
                 <w-banner
-                  class="mt-4"
-                  v-if="!state.strategy.config || Object.keys(state.strategy.config).length < 1"
                   :class="dark.isActive ? `bg-dark-4 text-grey-5` : `bg-grey-2 text-grey-7`">
                   <em>{{ t('admin.auth.noConfigOption') }}</em>
                 </w-banner>
@@ -478,6 +482,23 @@
             </w-item-section>
           </w-item>
           <w-separator class="my-2" inset />
+          <w-item>
+            <blueprint-icon class="self-start" icon="website" />
+            <w-item-section>
+              <w-item-label>{{ t(`admin.auth.passkeyRpId`) }}</w-item-label>
+              <w-item-label caption>{{ t(`admin.auth.passkeyRpIdHint`) }}</w-item-label>
+            </w-item-section>
+            <w-item-section>
+              <w-input
+                outlined
+                v-model="state.config.passkeyRpId"
+                dense
+                no-autofill
+                placeholder="example.com"
+                :aria-label="t(`admin.auth.passkeyRpId`)" />
+            </w-item-section>
+          </w-item>
+          <w-separator class="my-2" inset />
           <w-item tag="label">
             <blueprint-icon class="self-start" icon="administrator-male" />
             <w-item-section>
@@ -501,23 +522,6 @@
               <w-toggle
                 v-model="state.config.allowPersonalTokens"
                 :aria-label="t(`admin.auth.allowPersonalTokens`)" />
-            </w-item-section>
-          </w-item>
-          <w-separator class="my-2" inset />
-          <w-item>
-            <blueprint-icon icon="firewall" top />
-            <w-item-section>
-              <w-item-label>{{ t(`admin.auth.avatarFetchAllowList`) }}</w-item-label>
-              <w-item-label caption>{{ t(`admin.auth.avatarFetchAllowListHint`) }}</w-item-label>
-              <w-input
-                class="mt-2"
-                outlined
-                dense
-                type="textarea"
-                :rows="3"
-                v-model="state.avatarFetchAllowListText"
-                :placeholder="t(`admin.auth.avatarFetchAllowListPlaceholder`)"
-                :aria-label="t(`admin.auth.avatarFetchAllowList`)" />
             </w-item-section>
           </w-item>
         </w-card>
@@ -583,12 +587,10 @@ const state = reactive({
   /** The instance-wide settings, which belong to no strategy — the Configuration screen. */
   config: {
     allowPasskeys: true,
+    passkeyRpId: '',
     allowProfileEditing: true,
     allowPersonalTokens: true
   },
-  // -> Kept apart from `config`, which is handed to the auth config store as it stands: the store
-  //    holds what a visitor may know, and this list names addresses inside the wiki's network
-  avatarFetchAllowListText: '',
   // -> Read only, and only to warn: with the proxy headers untrusted, a redirect strategy's
   //    callback URL carries the proxy's protocol and host rather than the wiki's
   trustProxy: true
@@ -596,13 +598,6 @@ const state = reactive({
 
 // COMPUTED
 
-/** The textarea as the API wants it: trimmed, blanks dropped, one entry per line or comma. */
-const avatarFetchAllowListEntries = computed(() =>
-  state.avatarFetchAllowListText
-    .split(/[\n,]/)
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-)
 const isBuiltInLocal = computed(() => {
   return state.strategy.id === BUILTIN_LOCAL_STRATEGY_ID
 })
@@ -726,9 +721,7 @@ async function load() {
     ])
     state.strategies = modules ?? []
     state.trustProxy = security?.trustProxy === true
-    const { avatarFetchAllowList, ...switches } = config ?? {}
-    state.config = { ...state.config, ...switches }
-    state.avatarFetchAllowListText = (avatarFetchAllowList ?? []).join('\n')
+    state.config = { ...state.config, ...config }
     /*
       The running app holds these from `bootstrap`, which answered before this screen touched them —
       so without this, an administrator who turns passkeys off goes on being offered a passkey on the
@@ -841,9 +834,9 @@ async function save() {
     const resp = await API_CLIENT.put('authentication/config', {
       json: {
         allowPasskeys: state.config.allowPasskeys,
+        passkeyRpId: state.config.passkeyRpId,
         allowProfileEditing: state.config.allowProfileEditing,
-        allowPersonalTokens: state.config.allowPersonalTokens,
-        avatarFetchAllowList: avatarFetchAllowListEntries.value
+        allowPersonalTokens: state.config.allowPersonalTokens
       }
     }).json()
     if (!resp?.ok) {

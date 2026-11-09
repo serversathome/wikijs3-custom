@@ -72,9 +72,9 @@ class Settings {
           rootAdminUserId: ids.userAdminId,
           guestUserId: ids.userGuestId,
           allowPasskeys: true,
+          passkeyRpId: '',
           allowProfileEditing: true,
-          allowPersonalTokens: true,
-          avatarFetchAllowList: []
+          allowPersonalTokens: true
         }
       },
       {

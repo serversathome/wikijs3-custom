@@ -146,6 +146,20 @@
                       :aria-label="t(`admin.groups.redirectOnLogout`)" />
                   </w-item-section>
                 </w-item>
+                <w-separator class="my-2" inset />
+                <w-item tag="label">
+                  <blueprint-icon icon="key" />
+                  <w-item-section>
+                    <w-item-label>{{ t(`admin.groups.tfaRequired`) }}</w-item-label>
+                    <w-item-label caption>{{ t(`admin.groups.tfaRequiredHint`) }}</w-item-label>
+                  </w-item-section>
+                  <w-item-section avatar>
+                    <w-toggle
+                      v-model="state.group.tfaRequired"
+                      :disable="!canManageTfa"
+                      :aria-label="t(`admin.groups.tfaRequired`)" />
+                  </w-item-section>
+                </w-item>
               </w-card>
             </div>
             <div class="col-span-12 lg:col-span-4">
@@ -1091,7 +1105,7 @@ const rules = [
   {
     permission: 'write:scripts',
     title: 'Use JavaScript',
-    hint: 'Can insert JavaScript in pages.',
+    hint: 'Can set the JavaScript a page runs on load and unload, and embed iframes in pages.',
     warning: false,
     restrictedForSystem: true,
     disabled: false
@@ -1254,6 +1268,25 @@ const redirectRules = [(val) => !val || isRedirectTarget(val) || t('admin.groups
 const canManagePermissions = computed(() => userStore.can('manage:groups'))
 
 /*
+  Whether this user may change the group's 2FA requirement. On a group that administers the wiki it is
+  held to the line its membership is (`elevatedGroupGuard` in `api/groups.ts`): `manage:groups` is
+  stopped only by a `manage:system` group, `write:groups` by any elevated one. Lifting it there would
+  weaken every administrator's login, and the endpoint refuses the change.
+*/
+const canManageTfa = computed(() => {
+  if (!canManage.value) {
+    return false
+  }
+  if (userStore.can('manage:system')) {
+    return true
+  }
+  if (userStore.can('manage:groups')) {
+    return !(state.group.permissions ?? []).includes('manage:system')
+  }
+  return !state.group.isElevated
+})
+
+/*
   `manage:system` is the one permission a `manage:groups` holder may not move: granting it hands over
   the instance, revoking it locks the real administrators out. `api/groups.ts` refuses the change
   either way, so the toggle is held rather than left to fail on save -- every OTHER permission on such
@@ -1409,6 +1442,7 @@ async function save() {
         redirectOnLogin: state.group.redirectOnLogin ?? '',
         redirectOnFirstLogin: state.group.redirectOnFirstLogin ?? '',
         redirectOnLogout: state.group.redirectOnLogout ?? '',
+        tfaRequired: Boolean(state.group.tfaRequired),
         permissions: state.group.permissions ?? [],
         rules: state.group.rules ?? []
       }
@@ -1565,7 +1599,7 @@ function exportRules() {
     })
   }
   const rules = state.group.rules.map(({ __typename, ...r }) => r)
-  fileSave(new Blob([JSON.stringify(rules, null, 2)], { type: 'application/json;charset=UTF-8' }), {
+  fileSave(new Blob([JSON.stringify(rules, null, 2)], { type: 'application/json' }), {
     fileName: 'rules.json',
     extensions: ['.json']
   })

@@ -413,13 +413,14 @@ import { useEditorPanes } from '@/composables/editorPanes'
 import { usePreviewScrollSync } from '@/composables/previewScrollSync'
 import { useFenceCompletions } from '@/composables/fenceCompletions'
 import { useLinkCompletions } from '@/composables/linkCompletions'
+import { useBlockFolding } from '@/composables/blockFolding'
 import { useImagePropertiesLens } from '@/composables/imagePropertiesLens'
 import { notify } from '@/composables/notify'
 import { useTableCellNavigation } from '@/composables/tableCellNavigation'
 import { useTagCompletions } from '@/composables/tagCompletions'
 import { apiErrorMessage } from '@/helpers/apiError'
 import { assetPath } from '@/helpers/assets'
-import { blockMarkdown } from '@/helpers/blocks'
+import { blockMarkdown, isCanvasBlock } from '@/helpers/blocks'
 import {
   blockAttributeContext,
   blockNameContext,
@@ -427,6 +428,7 @@ import {
   blockSnippet,
   blockValues,
   findBlockContent,
+  findBlockRegions,
   findBlocks,
   writeBlockContent
 } from '@/helpers/markdownBlocks'
@@ -448,6 +450,7 @@ import { useSiteStore } from '@/stores/site'
 import { useUserStore } from '@/stores/user'
 
 import { enhanceRenderedContent } from '@/helpers/renderedContent'
+import { renderPermissionsOf, sanitizeRender } from '@/helpers/sanitizeRender'
 
 import { fileOpen } from 'browser-fs-access'
 import { debounce } from 'es-toolkit/function'
@@ -591,6 +594,14 @@ const HEADER_ICONS = [
   'mdi:format-header-6'
 ]
 
+/** Every block foldable from the gutter, a drawing folded from the start. See `useBlockFolding`. */
+const blockFolding = useBlockFolding({
+  getEditor: () => editor,
+  languageId: 'markdown',
+  findBlockRegions,
+  blockDefinition
+})
+
 /** The "Image Properties" lens, over every image in the source. See `useImagePropertiesLens`. */
 const imageLens = useImagePropertiesLens({
   getEditor: () => editor,
@@ -620,7 +631,7 @@ const fenceCompletions = useFenceCompletions({ getEditor: () => editor })
 // -> HTML tags such as `<kbd>` after a `<`, written with their closing tag
 const tagCompletions = useTagCompletions({ getEditor: () => editor })
 
-// -> Pages of this wiki after `](/`, by the start of their path
+// -> Pages of this wiki after `](`: by the link text until a `/` is typed, then by the start of the path
 const linkCompletions = useLinkCompletions({
   getEditor: () => editor,
   getLocale: () => docLocale.value
@@ -959,9 +970,27 @@ function insertBlockClb(markdown) {
     the cursor's own line, starting at the cursor's own column — which is column 1 only if nothing at
     all, indentation included, came before it.
   */
-  return {
+  const start = {
     lineNumber: position.lineNumber + (before ? 2 : 0),
     column: before ? 1 : position.column
+  }
+  editInsertedCanvas(start.lineNumber)
+  return start
+}
+
+/**
+ * "Edit Content" on a block that has just been inserted, when its body is a drawing -- see
+ * `isCanvasBlock`. Its starter body is an empty diagram, so the canvas is where the author was going.
+ *
+ * Found by its opening line, which is where `insertBlockClb` says the markup began; a block that line
+ * does not open (one inserted after indentation, which is not a block at all) is left alone. After a
+ * tick, because the picker that inserted it closes itself straight after -- and closing is setting
+ * the overlay to nothing, which would close this one too if it were already open.
+ */
+function editInsertedCanvas(line) {
+  const found = findBlocks(editor.getModel().getValue()).find((entry) => entry.line === line)
+  if (found && isCanvasBlock(blockDefinition(found.block))) {
+    nextTick(() => editBlockContent(found.line, found.block))
   }
 }
 
@@ -1181,7 +1210,10 @@ function replaceBlockContentClb({ source, replace }) {
       text: writeBlockContent(replace, source)
     }
   ])
-  editor.setPosition(new Position(replace.startLine, 1))
+  // -> A drawing folds back up, the caret on its opening line -- see `refoldCanvasBlock`
+  if (!blockFolding.refoldCanvasBlock(replace.startLine)) {
+    editor.setPosition(new Position(replace.startLine, 1))
+  }
   editor.focus()
 }
 
@@ -1544,10 +1576,11 @@ async function loadSiteBlocks() {
     )
   } catch (err) {
     /*
-      Left empty, which draws everything as it did before. The preview being too generous is the
-      better failure: the server strips a disabled block on save either way, so the cost is a preview
-      that flatters the page, against hiding blocks the site really does have. The lens is the other
-      way round — with no definitions to build a form from, it simply does not appear.
+      Left empty, which strips every block from the preview: it is sanitized against this list, and
+      a block nobody can vouch for is not one to put on screen. Saving in that state stores the page
+      without them, so it is said in the console at least; the source keeps them regardless, and the
+      next save from a working editor puts them back. The lens likewise -- with no definitions to
+      build a form from, it simply does not appear.
     */
     console.warn(`Could not read which blocks this site has enabled: ${err.message}`)
   }
@@ -1637,6 +1670,17 @@ function processContent(newContent) {
     html = md.render(newContent, {
       pagePath: props.noteKey ? '' : pageStore.path,
       pageExtensions: siteStore.pageExtensions
+    })
+    /*
+      Sanitized before it goes anywhere near the screen. The source is somebody's input -- the page's
+      last author, or a collaborator typing now -- and it is rendered in THIS session. Against what
+      this session may embed on the page, which is also what saving it would keep; a note's render
+      is never saved, and embeds nothing.
+    */
+    html = sanitizeRender(html, {
+      permissions: props.noteKey ? undefined : renderPermissionsOf(userStore.pagePermissions),
+      blocks: siteBlocks,
+      blobImages: true
     })
   } catch (err) {
     console.error(err)
@@ -1970,6 +2014,8 @@ function restoreEditorContent({ content }) {
   editor.executeEdits('restore', [{ range: model.getFullModelRange(), text: content ?? '' }])
   editor.pushUndoStop()
   syncContentToStore.flush()
+  // -> A whole page put back is a page opened again, and the edit over all of it unfolded everything
+  blockFolding.foldCanvasBlocks()
 }
 
 // MOUNTED
@@ -2140,6 +2186,10 @@ onMounted(async () => {
 
   // -> "Image Properties" over every image in the page -- see `useImagePropertiesLens`
   imageLens.register()
+
+  // -> Blocks fold down to their two fences, a drawing's XML from the start -- see `useBlockFolding`
+  blockFolding.register()
+  blockFolding.foldCanvasBlocks()
 
   // -> Define Formatting Actions
   editor.addAction({
@@ -2318,6 +2368,8 @@ onMounted(async () => {
             if (unmounted || !isCollabActive()) {
               return
             }
+            // -> The binding has just replaced the text with the room's, and unfolded it with that
+            blockFolding.foldCanvasBlocks()
           }
           /*
             Holding the room's document now, or carrying on as a plain editor without one -- and the
@@ -2402,6 +2454,7 @@ onBeforeUnmount(() => {
   linkCompletions.dispose()
   tableCellNavigation.dispose()
   imageLens.dispose()
+  blockFolding.dispose()
   // -> Before the editor goes: the binding is holding the model, and leaving the room is what takes
   //    this author's avatar out of everyone else's header. A note's room is left open behind it, for
   //    the view that holds it to close -- see `pages/LiveNote.vue`

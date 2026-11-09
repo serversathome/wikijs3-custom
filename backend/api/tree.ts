@@ -4,11 +4,14 @@ import { audit } from '../helpers/audit.ts'
 import { requestUserId } from '../helpers/requester.ts'
 import {
   decodeTreePath,
+  encodeTreePath,
   normalizeFolderPath,
   normalizeNewPagePath,
+  normalizePagePath,
   refuseNoteImagesPath
 } from '../helpers/common.ts'
-import { actorFrom, unpublishedFor, userRequired } from './pages.ts'
+import type { RulePageRef } from '../helpers/pageRules.ts'
+import { actorFrom, SOURCE_PERMISSIONS, unpublishedFor, userRequired } from './pages.ts'
 
 interface TreeQuery {
   parentId?: string
@@ -41,6 +44,18 @@ interface FolderBody {
  */
 function defaultLocale(siteId: string): string {
   return WIKI.sites[siteId]?.config?.locales?.primary ?? 'en'
+}
+
+/**
+ * A folder path as `createFolder` files a new folder's parent: each segment lowercased and
+ * NFC-normalized, which is what `encodeTreePath` writes into the ltree.
+ *
+ * A rule is matched against stored paths, so this is the spelling a permission check over where a
+ * folder is going has to be asked of, and the one the model is then handed — asked as the request
+ * spelled it, `HR` would miss a rule over `hr` and then be filed under `hr` regardless.
+ */
+function asStoredFolderPath(path?: string | null): string {
+  return decodeTreePath(encodeTreePath(path))
 }
 
 /** Comma-separated query lists, which is how the browser sends a multi-valued filter here. */
@@ -163,6 +178,117 @@ function mayOnFolder(req: SiteRequest, permission: string, path: string, locale:
   })
 }
 
+/** What is being done to a whole branch, which decides what each entry under it is asked for. */
+type BranchAction = 'delete' | 'move' | 'duplicate'
+
+/**
+ * Whether the caller may do to everything under a folder what doing it to the folder does to them.
+ *
+ * Deleting, moving or copying a folder is the same act on every folder, page and file below it, at
+ * any depth, so each of them is held to what that act would need on its own, at its own path:
+ *
+ * | Action    | Folder                       | Page                                         | File                          |
+ * | --------- | ---------------------------- | -------------------------------------------- | ----------------------------- |
+ * | delete    | `manage:pages`               | `delete:pages`                               | `manage:assets`               |
+ * | move      | `manage:pages` here and there | `manage:pages` here and there               | `manage:assets` here and there |
+ * | duplicate | `manage:pages` there         | source here, `write:pages` (`write:tags`) there | `write:assets` there       |
+ *
+ * And every one of them has to be VISIBLE to the caller as well: `read:pages` on a folder or a page,
+ * `read:assets` on a file, and for a page that is not live, being one of its editors. Otherwise a rule
+ * hiding something further down is undone by moving or copying its parent to where the rule does not
+ * reach, and deleting the parent destroys what the caller was never shown.
+ *
+ * What the caller holds on the folder itself decides nothing here. A rule is resolved per entry and
+ * the most specific one wins, so a DENY written for one page deep inside refuses the whole branch.
+ * The refusal does not say which entry it was, since naming one the caller may not read is the very
+ * thing this is here to prevent.
+ *
+ * @param from The folder's own slash-separated path.
+ * @param to For a move or a copy, where the folder's own path ends up; every entry under it lands at
+ *           its own path with that prefix swapped.
+ */
+async function mayOnBranch(
+  req: SiteRequest,
+  folder: TreeRow,
+  action: BranchAction,
+  to?: { path: string; locale: string }
+): Promise<boolean> {
+  // -> Above every rule, so there is nothing to look up
+  if (WIKI.models.groups.holdsSystemPermission(req)) {
+    return true
+  }
+  const actor = WIKI.models.groups.actorForRequest(req)
+  const unpublished = unpublishedFor(req)
+  const from = folderPathOf(folder)
+  const branch = await WIKI.models.tree.getBranch(folder)
+
+  return branch.every((entry) => {
+    const here: RulePageRef = {
+      siteId: req.params.siteId,
+      path: entry.path,
+      locale: entry.locale,
+      // -> A tag rule addresses pages; folders and files are matched on their path alone
+      ...(entry.type === 'page' ? { tags: entry.tags } : {})
+    }
+    const there: RulePageRef | null = to
+      ? { ...here, path: `${to.path}${entry.path.slice(from.length)}`, locale: to.locale }
+      : null
+    const may = (permission: string, ref: RulePageRef | null) =>
+      ref !== null && WIKI.models.groups.checkAccess(actor, permission, ref)
+
+    switch (entry.type) {
+      case 'folder': {
+        if (!may('read:pages', here)) {
+          return false
+        }
+        switch (action) {
+          case 'delete':
+            return may('manage:pages', here)
+          case 'move':
+            return may('manage:pages', here) && may('manage:pages', there)
+          case 'duplicate':
+            return may('manage:pages', there)
+        }
+        return false
+      }
+      case 'page': {
+        if (!may('read:pages', here) || (!entry.isLive && !(unpublished && unpublished(here)))) {
+          return false
+        }
+        switch (action) {
+          case 'delete':
+            return may('delete:pages', here)
+          case 'move':
+            return may('manage:pages', here) && may('manage:pages', there)
+          case 'duplicate':
+            // -> The copy is a new page made from this one's source, as creating it by hand would be
+            return (
+              SOURCE_PERMISSIONS.some((permission) => may(permission, here)) &&
+              may('write:pages', there) &&
+              (entry.tags.length === 0 || may('write:tags', there))
+            )
+        }
+        return false
+      }
+      case 'asset': {
+        if (!may('read:assets', here)) {
+          return false
+        }
+        switch (action) {
+          case 'delete':
+            return may('manage:assets', here)
+          case 'move':
+            return may('manage:assets', here) && may('manage:assets', there)
+          case 'duplicate':
+            return may('write:assets', there)
+        }
+        return false
+      }
+    }
+    return false
+  })
+}
+
 async function routes(app: FastifyInstance) {
   /**
    * BROWSE THE TREE
@@ -272,7 +398,9 @@ async function routes(app: FastifyInstance) {
         orderByDirection: q.orderByDirection,
         depth: q.depth,
         includeAncestors: q.includeAncestors,
-        includeRootFolders: q.includeRootFolders
+        includeRootFolders: q.includeRootFolders,
+        // -> A page that is not live is listed only for whoever may edit it, as the page view decides
+        unpublished: unpublishedFor(req)
       })
       return visibleTreeItems(req, items)
     }
@@ -638,18 +766,23 @@ async function routes(app: FastifyInstance) {
       /*
         Against where the folder is going. `parentPath` is the slash-separated path when given; with
         `parentId` the parent has to be looked up, and a missing one is left to the model to report.
+        A parent found also decides the locale, as it does in `createFolder`: a folder cannot be in a
+        different locale than the one holding it, so the one the request named is not where it lands.
       */
-      let parentPath = req.body.parentPath ?? ''
+      let parentPath = asStoredFolderPath(req.body.parentPath)
+      let locale = req.body.locale ?? defaultLocale(req.params.siteId)
       if (req.body.parentId) {
         const parent = await WIKI.models.tree.getFolderById(req.body.parentId)
-        parentPath = parent ? folderPathOf(parent) : parentPath
+        if (parent) {
+          parentPath = folderPathOf(parent)
+          locale = parent.locale
+        }
       }
       // -> Under the name it will be created as, which is what a rule written for it names
       const target = [parentPath, normalizeNewPagePath(req.body.pathName)].filter(Boolean).join('/')
       // -> Refused by the rules below as well, but as something nobody may do here, which is not the
       //    reason: the name is taken
       refuseNoteImagesPath(target)
-      const locale = req.body.locale ?? defaultLocale(req.params.siteId)
       if (!mayOnFolder(req, 'manage:pages', target, locale)) {
         return reply.forbidden('You are not allowed to create a folder here.')
       }
@@ -657,7 +790,7 @@ async function routes(app: FastifyInstance) {
         siteId: req.params.siteId,
         locale,
         parentId: req.body.parentId,
-        parentPath: req.body.parentPath,
+        parentPath,
         pathName: req.body.pathName,
         title: req.body.title
       })
@@ -693,7 +826,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Rename a folder',
         description:
-          'Everything under the folder moves with it. Sending the current path name back changes only the title, and leaves every descendant untouched.',
+          'Everything under the folder moves with it. Sending the current path name back changes only the title, and leaves every descendant untouched.\n\nA new name needs `manage:pages` on the folder under both names, and, since every entry under it moves too, what moving that entry on its own would need — `manage:pages` on each folder and page, `manage:assets` on each file, at its current path and at its new one — as well as being able to see it: `read:pages` (or `read:assets`), and for a page that is not live, `write:pages` or `manage:pages` on it. One entry the caller may not move refuses the whole rename.',
         tags: ['Tree'],
         params: folderIdParam,
         body: {
@@ -721,8 +854,35 @@ async function routes(app: FastifyInstance) {
       if (!existing || existing.siteId !== req.params.siteId) {
         return reply.notFound('This folder does not exist.')
       }
-      if (!mayOnFolder(req, 'manage:pages', folderPathOf(existing), existing.locale)) {
+      const existingPath = folderPathOf(existing)
+      if (!mayOnFolder(req, 'read:pages', existingPath, existing.locale)) {
+        return reply.notFound('This folder does not exist.')
+      }
+      if (!mayOnFolder(req, 'manage:pages', existingPath, existing.locale)) {
         return reply.forbidden('You are not allowed to rename this folder.')
+      }
+      /*
+        A new name moves everything under the folder to a new path, which is a move of the whole
+        branch: asked of where it lands as well as of every entry in it. The same name back, as
+        `renameFolder` reads it, changes the title alone and moves nothing.
+      */
+      const name =
+        normalizePagePath(req.body.pathName) === existing.fileName
+          ? existing.fileName
+          : normalizeNewPagePath(req.body.pathName)
+      if (name !== existing.fileName) {
+        const renamed = {
+          path: [decodeTreePath(existing.folderPath), name].filter(Boolean).join('/'),
+          locale: existing.locale
+        }
+        if (!mayOnFolder(req, 'manage:pages', renamed.path, renamed.locale)) {
+          return reply.forbidden('You are not allowed to rename this folder to this name.')
+        }
+        if (!(await mayOnBranch(req, existing, 'move', renamed))) {
+          return reply.forbidden(
+            'You are not allowed to rename this folder: you may not move everything it contains.'
+          )
+        }
       }
       const folder = await WIKI.models.tree.renameFolder({
         folderId: req.params.folderId,
@@ -766,7 +926,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Move a folder to another parent',
         description:
-          'Everything under the folder moves with it — pages, files, and the folders in between — and every storage target holding a copy follows. Any folder the destination needs is created.\n\nMoving needs `manage:pages` at the destination as well as at the source, since page rules are granted per path and per locale. A folder cannot be moved into its own subtree.',
+          'Everything under the folder moves with it — pages, files, and the folders in between — and every storage target holding a copy follows. Any folder the destination needs is created.\n\nMoving needs `manage:pages` at the destination as well as at the source, since page rules are granted per path and per locale. A folder cannot be moved into its own subtree.\n\nEvery entry under it moves too, so each needs what moving it on its own would — `manage:pages` on each folder and page, `manage:assets` on each file, at its current path and at its new one — and has to be visible to the caller: `read:pages` (or `read:assets`), and for a page that is not live, `write:pages` or `manage:pages` on it. One entry the caller may not move refuses the whole move.',
         tags: ['Tree'],
         params: folderIdParam,
         body: {
@@ -808,6 +968,9 @@ async function routes(app: FastifyInstance) {
       if (!existing || existing.siteId !== req.params.siteId) {
         return reply.notFound('This folder does not exist.')
       }
+      if (!mayOnFolder(req, 'read:pages', folderPathOf(existing), existing.locale)) {
+        return reply.notFound('This folder does not exist.')
+      }
       if (!mayOnFolder(req, 'manage:pages', folderPathOf(existing), existing.locale)) {
         return reply.forbidden('You are not allowed to move this folder.')
       }
@@ -816,17 +979,30 @@ async function routes(app: FastifyInstance) {
         over: rules are granted per path AND per locale, so without this a folder full of pages is a
         way to write into a place they could not have created one.
       */
-      const destination = normalizeFolderPath(req.body.folderPath)
       const destinationLocale = req.body.locale || existing.locale
-      if (
-        !mayOnFolder(
-          req,
-          'manage:pages',
-          [destination, existing.fileName].filter(Boolean).join('/'),
-          destinationLocale
-        )
-      ) {
+      // -> As `moveFolder` will resolve it, an existing folder's own spelling included: a rule is
+      //    matched against stored paths, and `HR` asked as given would miss a rule over `hr`
+      const destination = await WIKI.models.tree.folderPathAsFiled({
+        siteId: req.params.siteId,
+        locale: destinationLocale,
+        path: normalizeFolderPath(req.body.folderPath)
+      })
+      const moved = {
+        path: [destination, existing.fileName].filter(Boolean).join('/'),
+        locale: destinationLocale
+      }
+      if (!mayOnFolder(req, 'manage:pages', moved.path, moved.locale)) {
         return reply.forbidden('You are not allowed to move this folder there.')
+      }
+      // -> Everything under it moves too, and each entry is asked about on its own: a rule hiding one
+      //    of them would otherwise be undone by moving its parent somewhere the rule does not reach.
+      //    Not asked of a move to where the folder already is, which `moveFolder` answers as a no-op.
+      const isMoving =
+        destination !== decodeTreePath(existing.folderPath) || destinationLocale !== existing.locale
+      if (isMoving && !(await mayOnBranch(req, existing, 'move', moved))) {
+        return reply.forbidden(
+          'You are not allowed to move this folder there: you may not move everything it contains.'
+        )
       }
       const folder = await WIKI.models.tree.moveFolder({
         folderId: req.params.folderId,
@@ -872,7 +1048,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Duplicate a folder',
         description:
-          'Copies the folder and everything under it — the folders in between, the pages and the files, each as a new entry of its own with its own copy on every storage target. Aliases, translation sets and sidebar overrides are not carried across; folder colours are.\n\nCopying needs `manage:pages` at the destination as well as at the source, since page rules are granted per path and per locale. A folder cannot be copied into its own subtree, and the name must be free where it is going.',
+          'Copies the folder and everything under it — the folders in between, the pages and the files, each as a new entry of its own with its own copy on every storage target. Aliases, translation sets and sidebar overrides are not carried across; folder colours are.\n\nCopying needs `manage:pages` at the destination as well as at the source, since page rules are granted per path and per locale. A folder cannot be copied into its own subtree, and the name must be free where it is going.\n\nEvery entry under it is copied, and each needs what copying it by hand would: to be visible to the caller (`read:pages` or `read:assets`, and for a page that is not live, `write:pages` or `manage:pages` on it), the source of a page (`read:source`, `write:pages` or `manage:pages`), and at its new path `manage:pages` for a folder, `write:pages` for a page (and `write:tags` when it carries tags) or `write:assets` for a file. One entry the caller may not copy refuses the whole copy.',
         tags: ['Tree'],
         params: folderIdParam,
         body: {
@@ -923,22 +1099,29 @@ async function routes(app: FastifyInstance) {
       if (!existing || existing.siteId !== req.params.siteId) {
         return reply.notFound('This folder does not exist.')
       }
+      if (!mayOnFolder(req, 'read:pages', folderPathOf(existing), existing.locale)) {
+        return reply.notFound('This folder does not exist.')
+      }
       if (!mayOnFolder(req, 'manage:pages', folderPathOf(existing), existing.locale)) {
         return reply.forbidden('You are not allowed to duplicate this folder.')
       }
       // -> And where the copy is going, which is a whole branch of new pages arriving somewhere the
       //    copier may have no say over
-      const destination = normalizeFolderPath(req.body.folderPath)
+      const destination = asStoredFolderPath(normalizeFolderPath(req.body.folderPath))
       const destinationLocale = req.body.locale || existing.locale
-      if (
-        !mayOnFolder(
-          req,
-          'manage:pages',
-          [destination, normalizeNewPagePath(req.body.pathName)].filter(Boolean).join('/'),
-          destinationLocale
-        )
-      ) {
+      const copied = {
+        path: [destination, normalizeNewPagePath(req.body.pathName)].filter(Boolean).join('/'),
+        locale: destinationLocale
+      }
+      if (!mayOnFolder(req, 'manage:pages', copied.path, copied.locale)) {
         return reply.forbidden('You are not allowed to duplicate this folder there.')
+      }
+      // -> Every entry under it is copied, and each is asked about on its own: a copy of something
+      //    the caller may not read, landing where a rule no longer hides it, is a way to read it
+      if (!(await mayOnBranch(req, existing, 'duplicate', copied))) {
+        return reply.forbidden(
+          'You are not allowed to duplicate this folder there: you may not copy everything it contains.'
+        )
       }
       const folder = await WIKI.models.tree.duplicateFolder({
         folderId: req.params.folderId,
@@ -1061,7 +1244,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Delete a folder',
         description:
-          'Everything under the folder goes with it, pages and assets included. Each deleted page is recorded in its history first, so the branch can be recovered from there.',
+          'Everything under the folder goes with it, pages and assets included. Each deleted page is recorded in its history first, so the branch can be recovered from there.\n\nNeeds `manage:pages` on the folder and, since everything under it is deleted too, what deleting each entry on its own would: `manage:pages` on each folder, `delete:pages` on each page and `manage:assets` on each file. Each has to be visible to the caller as well — `read:pages` (or `read:assets`), and for a page that is not live, `write:pages` or `manage:pages` on it. One entry the caller may not delete refuses the whole deletion, regardless of what rule grants the folder itself.',
         tags: ['Tree'],
         params: folderIdParam,
         response: {
@@ -1082,8 +1265,18 @@ async function routes(app: FastifyInstance) {
       if (!existing || existing.siteId !== req.params.siteId) {
         return reply.notFound('This folder does not exist.')
       }
+      if (!mayOnFolder(req, 'read:pages', folderPathOf(existing), existing.locale)) {
+        return reply.notFound('This folder does not exist.')
+      }
       if (!mayOnFolder(req, 'manage:pages', folderPathOf(existing), existing.locale)) {
         return reply.forbidden('You are not allowed to delete this folder.')
+      }
+      // -> Everything under it goes too, so each entry needs what deleting it on its own would:
+      //    `manage:pages` on the folder says nothing about the pages and files inside it
+      if (!(await mayOnBranch(req, existing, 'delete'))) {
+        return reply.forbidden(
+          'You are not allowed to delete this folder: you may not delete everything it contains.'
+        )
       }
       const removed = await WIKI.models.tree.deleteFolder(req.params.folderId)
       // -> The tree entries are gone; these are the rows behind them, which is where a page and an

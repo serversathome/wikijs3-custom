@@ -1410,7 +1410,14 @@ const crumbSeparator = computed(() =>
  * written into the markup, so the bar takes a single flat list.
  */
 const breadcrumbs = computed(() => [
-  { key: 'home', icon: 'la:home', to: '/', ariaLabel: 'Home', tooltip: 'Home' },
+  // -> The home of the page's own locale, as every crumb after it is: a bare `/` is the primary's
+  {
+    key: 'home',
+    icon: 'la:home',
+    to: `${siteStore.localeUrlPrefix(pageStore.locale)}/`,
+    ariaLabel: 'Home',
+    tooltip: 'Home'
+  },
   ...pageStore.breadcrumbs.map((brd) => ({
     key: brd.id,
     icon: brd.icon,
@@ -1715,7 +1722,15 @@ watch(
         })
       } catch (err) {
         editorStore.closeEditor()
-        notify({ type: 'negative', message: t('editor.openFailed'), caption: err.message })
+        if (err.message === 'ERR_PAGE_EDIT_LOCKED') {
+          notify({
+            type: 'negative',
+            message: t('editor.editLocked'),
+            caption: t('editor.editLockedHint')
+          })
+        } else {
+          notify({ type: 'negative', message: t('editor.openFailed'), caption: err.message })
+        }
         // -> Onto the page itself, which says what happened properly: not found, or the unauthorized
         //    screen with its offer to sign in as somebody else
         router.replace(`/${route.params.pagePath}`)
