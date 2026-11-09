@@ -17,6 +17,7 @@ on:
       - 'dev/chart/**'
       - 'dev/helm/**'
       - 'dev/packer/**'
+      - '.github/workflows/fork-upstream-sync.yml'
   workflow_dispatch:
     inputs:
       arm64:

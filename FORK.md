@@ -67,7 +67,7 @@ The README's note at the top is the fork's; the rest of the README is upstream's
 `.github/workflows/fork-image.yml` builds `dev/build/Dockerfile` and publishes it to
 `ghcr.io/serversathome/wikijs3-custom` on every push to `main`, then cuts a GitHub release for it —
 nothing is tagged or released by hand. Pushes touching only documentation (`*.md`, `.claude/`, the
-dev container, the charts) publish nothing.
+dev container, the charts) or the upstream sync workflow publish nothing.
 
 The version is the upstream release the fork is built on plus a running number: `3.0.2-fork.1`,
 `3.0.2-fork.2`, …, restarting at `.1` once a newer upstream release is merged in. Each build is
