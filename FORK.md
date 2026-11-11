@@ -1,7 +1,7 @@
 # Fork changes
 
 This repository is [Wiki.js 3](https://github.com/requarks/wiki) (imported from upstream tag
-`3.0.2`, history intact; last merged up to `3.3.0`) with the additions below. Upstream's 3.x
+`3.0.2`, history intact; last merged up to `3.3.1`) with the additions below. Upstream's 3.x
 releases are tagged on its `scarlett` branch; add it as the `upstream` remote
 (`git remote add upstream https://github.com/requarks/wiki.git`) and merge new release tags from it. Fork code is marked `FORK:` in comments so a merge conflict is easy to place, and
 new code lives in files of its own wherever it can, so upstream files gain only a few lines.
