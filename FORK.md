@@ -53,12 +53,20 @@ check results, the new database migrations and the upstream commits. It also upd
 up to" note at the top of this file. Merging the pull request is what publishes the new image.
 
 When the merge conflicts, it opens an issue naming the files and the commands to finish by hand
-instead. A release is tried once: while its branch exists or its conflict issue is open, the workflow leaves it
-alone, so delete the branch (or close the issue) to have it try that release again.
+instead. A release is tried once: while its branch exists or an issue about it is open, the workflow leaves
+it alone, so delete the branch (or close the issue) to have it try that release again.
 
 GitHub only lets the workflow open pull requests when **Settings → Actions → General → Workflow
 permissions → Allow GitHub Actions to create and approve pull requests** is ticked.
-Pull requests it opens don't trigger other workflows, which is why it runs the checks itself.
+
+Upstream releases often change upstream's own workflow files (3.1.0 and 3.3.1 did), and GitHub
+never lets the built-in `GITHUB_TOKEN` push those. So the workflow pushes with the
+`UPSTREAM_SYNC_TOKEN` repository secret when there is one: a fine-grained personal access token for
+this repository with **Contents**, **Pull requests**, **Issues** and **Workflows** set to read and
+write. Without it, a release that touches `.github/workflows` opens an issue asking for the token
+instead of a pull request; close the issue once the secret is added and run the workflow again.
+Pull requests opened with `GITHUB_TOKEN` don't trigger other workflows, which is why it runs the
+checks itself.
 
 The README's note at the top is the fork's; the rest of the README is upstream's.
 
