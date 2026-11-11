@@ -52,6 +52,12 @@ and lint and the frontend and blocks builds, and opens a pull request into `main
 check results, the new database migrations and the upstream commits. It also updates the "last merged
 up to" note at the top of this file. Merging the pull request is what publishes the new image.
 
+When every check passes, the workflow merges that pull request itself, so a new upstream release is
+published as an image with nobody involved. A failed check leaves the pull request open for review.
+Auto-merge needs `UPSTREAM_SYNC_TOKEN` (below), since a merge made with `GITHUB_TOKEN` would not start
+the image build. To review every release by hand instead, add a repository variable
+`UPSTREAM_AUTO_MERGE` set to `false` (Settings → Secrets and variables → Actions → Variables).
+
 When the merge conflicts, it opens an issue naming the files and the commands to finish by hand
 instead. A release is tried once: while its branch exists or an issue about it is open, the workflow leaves
 it alone, so delete the branch (or close the issue) to have it try that release again.
