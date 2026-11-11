@@ -5,6 +5,12 @@
 # frontend build), and opens a pull request with the result. A merge that conflicts opens an issue
 # instead, listing the files and the commands to finish it by hand. Nothing reaches main until the
 # pull request is merged, and that push is what publishes the image (fork-image.yml).
+#
+# The UPSTREAM_SYNC_TOKEN secret (a fine-grained personal access token on this repository with
+# Contents, Pull requests, Issues and Workflows set to read and write) is what lets it push a release
+# that changes upstream's own workflow files: GITHUB_TOKEN can never be given the workflows
+# permission, and GitHub refuses that push. Without the secret it falls back to GITHUB_TOKEN, and a
+# release that touches .github/workflows opens an issue saying so instead of failing.
 name: Fork Upstream Sync
 
 on:
@@ -25,7 +31,8 @@ jobs:
       pull-requests: write
       issues: write
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+      HAS_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN != '' }}
       UPSTREAM: https://github.com/requarks/wiki.git
 
     steps:
@@ -33,6 +40,8 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # -> The credentials the merge branch is pushed with
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Find New Release
         id: find
@@ -69,6 +78,11 @@ jobs:
           git checkout -b "$BRANCH"
           if git merge --no-ff --no-edit -m "Merge upstream release ${TAG}" "$TAG"; then
             echo "conflicts=false" >> $GITHUB_OUTPUT
+            # -> GITHUB_TOKEN may not push a change to a workflow file, regardless of its permissions
+            if [[ "$HAS_SYNC_TOKEN" != 'true' ]] && ! git diff --quiet origin/main HEAD -- .github/workflows; then
+              echo "blocked=true" >> $GITHUB_OUTPUT
+              git diff --name-only origin/main HEAD -- .github/workflows > workflows.txt
+            fi
             # -> Keep FORK.md's record of the upstream release the fork is merged up to
             sed -i -E "s/last merged up to \`[^\`]+\`/last merged up to \`${TAG}\`/" FORK.md
             if ! git diff --quiet FORK.md; then
@@ -81,14 +95,14 @@ jobs:
           fi
 
       - name: Setup Node.js environment
-        if: steps.merge.outputs.conflicts == 'false'
+        if: steps.merge.outputs.conflicts == 'false' && steps.merge.outputs.blocked != 'true'
         uses: actions/setup-node@v7
         with:
           node-version: 26.x
 
       - name: Check
         id: check
-        if: steps.merge.outputs.conflicts == 'false'
+        if: steps.merge.outputs.conflicts == 'false' && steps.merge.outputs.blocked != 'true'
         run: |
           # -> Every check runs even when an earlier one fails, so the pull request reports all of them
           result() {
@@ -124,7 +138,7 @@ jobs:
           echo "failed=${FAILED}" >> $GITHUB_OUTPUT
 
       - name: Open Pull Request
-        if: steps.merge.outputs.conflicts == 'false'
+        if: steps.merge.outputs.conflicts == 'false' && steps.merge.outputs.blocked != 'true'
         env:
           TAG: ${{ steps.find.outputs.tag }}
           BRANCH: ${{ steps.find.outputs.branch }}
@@ -162,6 +176,26 @@ jobs:
             echo "Merging this publishes the image as \`${TAG}-fork.1\`."
           } > pr.md
           gh pr create --base main --head "$BRANCH" --title "Merge upstream Wiki.js ${TAG}" --body-file pr.md
+
+      - name: Open Token Issue
+        if: steps.merge.outputs.blocked == 'true'
+        env:
+          TAG: ${{ steps.find.outputs.tag }}
+        run: |
+          {
+            echo "Upstream released **${TAG}**. It merges cleanly, but it changes upstream's own workflow files:"
+            echo
+            sed 's/^/- `/; s/$/`/' workflows.txt
+            echo
+            echo "GitHub never lets the workflow's built-in token push a change to a workflow file, so the"
+            echo "pull request could not be opened. To let it, add a repository secret named"
+            echo '`UPSTREAM_SYNC_TOKEN`: a fine-grained personal access token for this repository with'
+            echo '**Contents**, **Pull requests**, **Issues** and **Workflows** set to read and write'
+            echo '(Settings → Secrets and variables → Actions → New repository secret).'
+            echo
+            echo "Then close this issue and run **Actions → Fork Upstream Sync → Run workflow**."
+          } > issue.md
+          gh issue create --title "Merge upstream ${TAG}: needs a token that may change workflows" --body-file issue.md
 
       - name: Open Conflict Issue
         if: steps.merge.outputs.conflicts == 'true'
