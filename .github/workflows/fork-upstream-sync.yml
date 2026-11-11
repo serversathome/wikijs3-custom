@@ -4,7 +4,9 @@
 # the tag on a branch of its own, runs the same checks a person would (backend typecheck + lint,
 # frontend build), and opens a pull request with the result. A merge that conflicts opens an issue
 # instead, listing the files and the commands to finish it by hand. Nothing reaches main until the
-# pull request is merged, and that push is what publishes the image (fork-image.yml).
+# pull request is merged, and that push is what publishes the image (fork-image.yml). When every check
+# passes, the workflow merges the pull request itself, unless the repository variable
+# UPSTREAM_AUTO_MERGE is false; a failed check always leaves it open for review.
 #
 # The UPSTREAM_SYNC_TOKEN secret (a fine-grained personal access token on this repository with
 # Contents, Pull requests, Issues and Workflows set to read and write) is what lets it push a release
@@ -143,6 +145,8 @@ jobs:
           TAG: ${{ steps.find.outputs.tag }}
           BRANCH: ${{ steps.find.outputs.branch }}
           FAILED: ${{ steps.check.outputs.failed }}
+          # -> On unless the repository variable UPSTREAM_AUTO_MERGE is set to false
+          AUTO_MERGE: ${{ vars.UPSTREAM_AUTO_MERGE != 'false' }}
         run: |
           git push -u origin "$BRANCH"
           PREV=$(git describe --tags --abbrev=0 --match '3.*' --exclude '*-*' origin/main)
@@ -176,6 +180,25 @@ jobs:
             echo "Merging this publishes the image as \`${TAG}-fork.1\`."
           } > pr.md
           gh pr create --base main --head "$BRANCH" --title "Merge upstream Wiki.js ${TAG}" --body-file pr.md
+
+          # -> Merged straight away when every check passed. Only with UPSTREAM_SYNC_TOKEN: a merge made
+          #    with GITHUB_TOKEN would not start fork-image.yml, so no image would be published
+          if [[ "$AUTO_MERGE" != 'true' ]]; then
+            echo "Auto-merge is off (UPSTREAM_AUTO_MERGE=false): leaving the pull request for review."
+          elif [[ "$FAILED" == "1" ]]; then
+            echo "A check failed: leaving the pull request for review."
+          elif [[ "$HAS_SYNC_TOKEN" != 'true' ]]; then
+            echo "No UPSTREAM_SYNC_TOKEN: leaving the pull request to be merged by hand."
+          else
+            # -> GitHub computes a new pull request's mergeability in the background, so allow it a moment
+            for attempt in 1 2 3 4 5; do
+              if gh pr merge "$BRANCH" --merge --delete-branch --subject "Merge upstream Wiki.js ${TAG}"; then
+                exit 0
+              fi
+              sleep $(( attempt * 10 ))
+            done
+            echo "::warning::Could not merge the pull request automatically; it is left open for review."
+          fi
 
       - name: Open Token Issue
         if: steps.merge.outputs.blocked == 'true'
