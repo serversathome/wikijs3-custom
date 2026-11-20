@@ -49,12 +49,6 @@
       </w-item-section>
     </w-item>
     <w-separator inset spaced="sm" />
-    <!--
-      The handle, which is NOT gated on `canEdit` like the name and the fields under it. No identity
-      provider owns a wiki mention handle, so a wiki that keeps its names in step with a directory has
-      no reason to stop anybody choosing one -- and with profile editing off this would otherwise be
-      the one field nobody could ever fill in.
-    -->
     <w-item>
       <blueprint-icon icon="rename" />
       <w-item-section>
@@ -69,7 +63,9 @@
           hide-bottom-space
           prefix="@"
           maxlength="32"
-          :aria-label="t(`profile.handle`)" />
+          :rules="[(val) => isValidHandle(val) || t('profile.handleInvalid')]"
+          :aria-label="t(`profile.handle`)"
+          :readonly="!canEdit" />
       </w-item-section>
     </w-item>
     <w-separator inset spaced="sm" />
@@ -300,6 +296,7 @@ import { useMeta } from '@/composables/meta'
 import { notify } from '@/composables/notify'
 
 import { apiErrorMessage } from '@/helpers/apiError'
+import { isValidHandle } from '@/helpers/handles'
 import { loading } from '@/composables/loading'
 import { computed, onMounted, reactive } from 'vue'
 
@@ -438,6 +435,15 @@ function applyProfile(profile) {
 }
 
 async function save() {
+  // -> Said here in the reader's language, rather than left to the server, which quotes its pattern
+  if (canEdit.value && !isValidHandle(state.config.handle)) {
+    notify({
+      type: 'negative',
+      message: t('profile.saveFailed'),
+      caption: t('profile.handleInvalid')
+    })
+    return
+  }
   loading.show({
     message: t('profile.saving')
   })
@@ -453,12 +459,12 @@ async function save() {
         ...(canEdit.value
           ? {
               name: state.config.name,
+              handle: state.config.handle.trim(),
               location: state.config.location,
               jobTitle: state.config.jobTitle,
               pronouns: state.config.pronouns
             }
           : {}),
-        handle: state.config.handle.trim(),
         locale: state.config.locale,
         timezone: state.config.timezone,
         dateFormat: state.config.dateFormat,

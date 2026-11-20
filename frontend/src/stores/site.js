@@ -54,6 +54,21 @@ function describeLocales(codes, installed) {
 }
 
 /**
+ * Where a sidebar set to `position` (`off`, `left` or `right`) is drawn for `locale`: as set, or on the
+ * other side where the theme inverts positions for right-to-left locales and `locale` is one.
+ */
+function sideFor(state, position, locale) {
+  if (
+    position === 'off' ||
+    !state.theme.invertPositionsForRtl ||
+    !state.installedLocales.find((lc) => lc.code === locale)?.isRTL
+  ) {
+    return position
+  }
+  return position === 'left' ? 'right' : 'left'
+}
+
+/**
  * The editors whose pages have no article of their own.
  *
  * The client's copy of `BODYLESS_EDITORS` in `backend/models/pages.ts`, which is what decides on the
@@ -84,6 +99,28 @@ export const useSiteStore = defineStore('site', {
       title: '',
       content: ''
     },
+    /**
+     * The site's maintenance mode, set beside the banner — `off`, `readonly` or `restricted` — and
+     * whether it lets THIS reader through (`isBypassed`), which the server works out from their groups.
+     * `effectiveMaintenance` below is the question most callers mean. See `backend/helpers/maintenance.ts`.
+     */
+    maintenance: {
+      mode: 'off',
+      isBypassed: false
+    },
+    /**
+     * The cookie consent banner (`CookieConsentBanner.vue`). `message` is markdown, rendered at display
+     * time the way the site banner's content is.
+     */
+    cookieConsent: {
+      isEnabled: false,
+      message: ''
+    },
+    /**
+     * Whether the site serves any analytics tag, which is what decides whether the consent banner
+     * offers a choice about tracking or only asks to be acknowledged. Computed by the server.
+     */
+    hasAnalytics: false,
     dark: false,
     title: '',
     description: '',
@@ -221,6 +258,7 @@ export const useSiteStore = defineStore('site', {
       contentWidth: 'full',
       sidebarPosition: 'left',
       tocPosition: 'right',
+      invertPositionsForRtl: true,
       showPrintBtn: true,
       showPageProgress: true,
       pageTransitions: true
@@ -244,7 +282,8 @@ export const useSiteStore = defineStore('site', {
       them; the automations are the server's business alone. Off until the site says otherwise.
     */
     navigation: {
-      showParentLink: false
+      showParentLink: false,
+      showFolderPages: false
     },
     /*
       Where "Go up" leads from the base menu on screen -- `{ locale, path }`, or null where there is
@@ -256,6 +295,12 @@ export const useSiteStore = defineStore('site', {
     }
   }),
   getters: {
+    /**
+     * The maintenance mode as it applies to this reader: the site's own, or `off` when they bypass
+     * it. `restricted` is what swaps every screen but the login for the maintenance page (`App.vue`).
+     */
+    effectiveMaintenance: (state) =>
+      state.maintenance.isBypassed ? 'off' : state.maintenance.mode,
     /** How a locale is referred to — `fr` for `fr-FR` — falling back to the code until read. */
     localeAlias: (state) => (code) =>
       state.installedLocales.find((lc) => lc.code === code)?.displayCode ?? code,
@@ -293,6 +338,20 @@ export const useSiteStore = defineStore('site', {
     },
     overlayIsShown: (state) => Boolean(state.overlay),
     sideNavIsDisabled: (state) => Boolean(state.theme.sidebarPosition === 'off'),
+    /**
+     * The side of the window the nav sidebar is drawn on, `left` or `right` -- or `off` -- for an
+     * interface in `locale`. That is the theme's `sidebarPosition`, swapped on a right-to-left locale
+     * when the theme asks for it (`invertPositionsForRtl`). Asked of the INTERFACE's locale, which is
+     * the one the sidebar is written in.
+     */
+    sidebarSide: (state) => (locale) => sideFor(state, state.theme.sidebarPosition, locale),
+    /**
+     * The side of the article the table of contents is drawn on, `left` or `right` -- or `off` -- for
+     * content in `locale`. That is the theme's `tocPosition`, swapped on a right-to-left locale when
+     * the theme asks for it (`invertPositionsForRtl`). Asked of the locale of what the contents list,
+     * which is the one the column is written in.
+     */
+    tocSide: (state) => (locale) => sideFor(state, state.theme.tocPosition, locale),
     scrollStyle: (state) => {
       const userStore = useUserStore()
       let isDark = false
@@ -520,6 +579,15 @@ export const useSiteStore = defineStore('site', {
           ...this.banner,
           ...siteInfo.banner
         },
+        maintenance: {
+          mode: siteInfo.maintenance?.mode ?? 'off',
+          isBypassed: siteInfo.maintenance?.isBypassed === true
+        },
+        cookieConsent: {
+          ...this.cookieConsent,
+          ...siteInfo.cookieConsent
+        },
+        hasAnalytics: siteInfo.hasAnalytics === true,
         features: {
           ...this.features,
           ...siteInfo.features
@@ -537,7 +605,8 @@ export const useSiteStore = defineStore('site', {
           ...siteInfo.uploads
         },
         navigation: {
-          showParentLink: Boolean(siteInfo.navigation.showParentLink)
+          showParentLink: Boolean(siteInfo.navigation.showParentLink),
+          showFolderPages: Boolean(siteInfo.navigation.showFolderPages)
         },
         /*
           Flattened to one boolean apiece: what this store is asked is whether an editor is on, and

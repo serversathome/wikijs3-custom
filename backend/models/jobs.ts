@@ -190,8 +190,9 @@ class Jobs {
    *
    * Exactly one instance holds the `cron` lock at a time and refreshes it as it queues the next
    * batch of scheduled jobs, so a stale timestamp means no instance is running that check any more.
-   * The lock is only re-acquired once it is 5 minutes old, and the check itself runs on an interval,
-   * so the threshold has to be a comfortable multiple of that to avoid crying wolf.
+   * "Stale" is `scheduler.cronHorizon()`: three check intervals, so an occasional missed check is
+   * not reported, and the same span the planner queues ahead. A scheduler reported healthy has
+   * therefore not dropped any scheduled run yet.
    */
   async isHealthy(): Promise<boolean> {
     const results = await WIKI.db
@@ -206,7 +207,7 @@ class Jobs {
     return (
       Temporal.Instant.compare(
         lastCheckedAt.toTemporalInstant(),
-        Temporal.Now.instant().subtract({ minutes: 15 })
+        Temporal.Now.instant().subtract(WIKI.scheduler.cronHorizon())
       ) > 0
     )
   }

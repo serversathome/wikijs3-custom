@@ -540,7 +540,7 @@ async function routes(app: FastifyInstance) {
       const level = await WIKI.models.tree.browse({
         siteId: req.params.siteId,
         path: req.query.path,
-        locale: req.query.locale ?? defaultLocale(req.params.siteId),
+        locale: req.query.locale || defaultLocale(req.params.siteId),
         unpublished: unpublishedFor(req)
       })
       if (!level) {
@@ -561,7 +561,7 @@ async function routes(app: FastifyInstance) {
           WIKI.models.groups.checkAccess(actor, 'read:pages', {
             siteId: req.params.siteId,
             path: item.path,
-            locale: req.query.locale ?? defaultLocale(req.params.siteId),
+            locale: req.query.locale || defaultLocale(req.params.siteId),
             tags: item.tags
           })
         )
@@ -653,7 +653,7 @@ async function routes(app: FastifyInstance) {
       return WIKI.models.tree.listPages({
         siteId: req.params.siteId,
         path: req.query.path,
-        locale: req.query.locale ?? defaultLocale(req.params.siteId),
+        locale: req.query.locale || defaultLocale(req.params.siteId),
         tags: splitList(req.query.tags),
         limit: req.query.limit,
         orderBy: req.query.orderBy,
@@ -716,7 +716,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: 'Create a folder',
         description:
-          'Any folder missing between the site root and the new one is created along with it, so a path can be filled in from the middle out.',
+          "Any folder missing between the site root and the new one is created along with it, so a path can be filled in from the middle out.\n\nNeeds `manage:pages` or `write:pages` on the new folder's path.",
         tags: ['Tree'],
         params: siteIdParam,
         body: {
@@ -770,7 +770,7 @@ async function routes(app: FastifyInstance) {
         different locale than the one holding it, so the one the request named is not where it lands.
       */
       let parentPath = asStoredFolderPath(req.body.parentPath)
-      let locale = req.body.locale ?? defaultLocale(req.params.siteId)
+      let locale = req.body.locale || defaultLocale(req.params.siteId)
       if (req.body.parentId) {
         const parent = await WIKI.models.tree.getFolderById(req.body.parentId)
         if (parent) {
@@ -783,7 +783,17 @@ async function routes(app: FastifyInstance) {
       // -> Refused by the rules below as well, but as something nobody may do here, which is not the
       //    reason: the name is taken
       refuseNoteImagesPath(target)
-      if (!mayOnFolder(req, 'manage:pages', target, locale)) {
+      /*
+        `write:pages` as well as `manage:pages`: somebody who may write a page at a path may already
+        bring the folders above it into being, since saving a page creates whatever folders its path is
+        missing (`addEntry`). Refusing them the same folders asked for on their own only sent the save
+        dialog's offer to create them to `manage:pages` holders. Renaming, moving and deleting a folder
+        reach everything under it, and stay `manage:pages`.
+      */
+      if (
+        !mayOnFolder(req, 'manage:pages', target, locale) &&
+        !mayOnFolder(req, 'write:pages', target, locale)
+      ) {
         return reply.forbidden('You are not allowed to create a folder here.')
       }
       const folder = await WIKI.models.tree.createFolder({

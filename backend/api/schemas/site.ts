@@ -52,6 +52,43 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
           }
         }
       },
+      maintenance: {
+        type: 'object',
+        description:
+          "The site's maintenance mode, set beside the site-wide banner. `readonly` keeps the site readable but refuses every change to it; `restricted` closes it, the app showing a maintenance page with the banner's title and contents in place of every screen but the login, and the server answering 503 for everything but signing in. Neither applies to a requester holding `manage:system` or belonging to one of `bypassGroups`.\n\n`isBypassed` is computed per request: whether the CALLER is let through. `bypassGroups` is only returned to a caller holding `manage:sites`.",
+        properties: {
+          mode: {
+            type: 'string',
+            enum: ['off', 'readonly', 'restricted']
+          },
+          bypassGroups: {
+            type: 'array',
+            items: { type: 'string', format: 'uuid' }
+          },
+          isBypassed: {
+            type: 'boolean'
+          }
+        }
+      },
+      cookieConsent: {
+        type: 'object',
+        description:
+          'A cookie consent banner shown to every reader of this site until they answer it. Off by default: the wiki itself sets only its session cookie, which is strictly necessary. When the site serves analytics (`hasAnalytics`), the banner offers necessary cookies only or necessary plus tracking, and the analytics tags are left out of the document for any reader who has not accepted tracking. The message is markdown, rendered by the app.',
+        properties: {
+          isEnabled: {
+            type: 'boolean'
+          },
+          message: {
+            type: 'string',
+            maxLength: 8192
+          }
+        }
+      },
+      hasAnalytics: {
+        type: 'boolean',
+        description:
+          'Whether this site serves any analytics tag — at least one provider under Admin → Analytics is enabled with its required fields filled. Computed, never stored: what the cookie consent banner offers a choice about.'
+      },
       pageExtensions: {
         type: 'array',
         items: {
@@ -301,7 +338,13 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
           addPagesToParentMenu: {
             type: 'boolean',
             description:
-              "Add a link to a new page at the end of the menu owned by its folder — the locale's own menu at the site root. With `createFolderMenus` as well, a new folder's menu is added there as a menu item."
+              "Add a link to a new page to the menu owned by its folder — the locale's own menu at the site root — placed as `addPagesPlacement` says. With `createFolderMenus` as well, a new folder's menu is added there as a menu item."
+          },
+          addPagesPlacement: {
+            type: 'string',
+            enum: ['alphabetical', 'end'],
+            description:
+              "Where `addPagesToParentMenu` puts what it adds. `alphabetical`: among the top-level items of the menu's last section (after its last header or separator), before the first whose label sorts after the new one's — the order the navigation editor's Smart Sort gives. `end`: after every other item."
           },
           removePagesFromParentMenu: {
             type: 'boolean',
@@ -311,7 +354,13 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
           migrateLinksOnMove: {
             type: 'boolean',
             description:
-              "Move a moved page's link from the menu of the folder it left to the menu of the folder it arrived in (not put back where that folder owns none), and point every other link to it — or, for a moved or renamed folder, to anything under it — at where it now is."
+              "Move a moved page's link from the menu of the folder it left to the menu of the folder it arrived in (not put back where that folder owns none), placed as `migrateLinksPlacement` says, and point every other link to it — or, for a moved or renamed folder, to anything under it — at where it now is."
+          },
+          migrateLinksPlacement: {
+            type: 'string',
+            enum: ['alphabetical', 'end'],
+            description:
+              "Where `migrateLinksOnMove` puts what it carries into the menu of the folder arrived in: a moved page's link, or the menu items opening a moved folder's menu. Same choices as `addPagesPlacement`."
           },
           updateLabelsOnRename: {
             type: 'boolean',
@@ -332,6 +381,11 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
             type: 'boolean',
             description:
               'Show a "Go up" link at the top of every menu that is not a locale\'s root menu, to the page or folder above the one owning it — unless the menu was opened from a menu item, where "Go back" takes its place.'
+          },
+          showFolderPages: {
+            type: 'boolean',
+            description:
+              'Show an "In this folder" section at the top of the sidebar of a page that has a folder of pages at its own path, listing the pages in that folder the reader may open.'
           },
           includeStorageOperations: {
             type: 'boolean',
@@ -503,6 +557,11 @@ export async function registerSchemas(app: FastifyInstance): Promise<void> {
           tocPosition: {
             type: 'string',
             enum: ['off', 'left', 'right']
+          },
+          invertPositionsForRtl: {
+            type: 'boolean',
+            description:
+              'Swap the sides of the sidebar and of the table of contents on a right-to-left locale: one set to the left is drawn on the right, and the other way round.'
           },
           showPrintBtn: {
             type: 'boolean'

@@ -530,12 +530,24 @@ const overlays = {
     loader: () => import('../components/GroupEditOverlay.vue'),
     loadingComponent: LoadingGeneric
   }),
+  ImportConfluenceOverlay: defineAsyncComponent({
+    loader: () => import('../components/ImportConfluenceOverlay.vue'),
+    loadingComponent: LoadingGeneric
+  }),
+  ImportDokuwikiOverlay: defineAsyncComponent({
+    loader: () => import('../components/ImportDokuwikiOverlay.vue'),
+    loadingComponent: LoadingGeneric
+  }),
   ImportHedgedocOverlay: defineAsyncComponent({
     loader: () => import('../components/ImportHedgedocOverlay.vue'),
     loadingComponent: LoadingGeneric
   }),
   ImportWikijs2Overlay: defineAsyncComponent({
     loader: () => import('../components/ImportWikijs2Overlay.vue'),
+    loadingComponent: LoadingGeneric
+  }),
+  ImportXwikiOverlay: defineAsyncComponent({
+    loader: () => import('../components/ImportXwikiOverlay.vue'),
     loadingComponent: LoadingGeneric
   }),
   // -> The same editor a page opens from its sidebar, keyed as the page view keys it

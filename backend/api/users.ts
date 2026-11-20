@@ -82,7 +82,7 @@ export function whoAmI(req: FastifyRequest): Record<string, any> {
  * The profile fields an identity provider owns: who the person is, as the wiki displays them.
  * `allowProfileEditing` is what says whether they are the user's to change here.
  */
-const IDENTITY_PROFILE_FIELDS = ['name', 'location', 'jobTitle', 'pronouns'] as const
+const IDENTITY_PROFILE_FIELDS = ['name', 'handle', 'location', 'jobTitle', 'pronouns'] as const
 
 /**
  * The rest of the profile: how the wiki behaves for this one person.
@@ -94,13 +94,6 @@ const IDENTITY_PROFILE_FIELDS = ['name', 'location', 'jobTitle', 'pronouns'] as 
  * away with it.
  */
 const PERSONAL_PROFILE_FIELDS = [
-  /*
-    The handle is here rather than among the identity fields on purpose. No identity provider owns a
-    wiki mention handle — there is nothing in a directory for it to be kept in step with — so a wiki
-    that turned profile editing off to keep names authoritative would otherwise have taken away the
-    one field that lets anybody be mentioned in a comment.
-  */
-  'handle',
   'locale',
   'timezone',
   'dateFormat',
@@ -128,7 +121,13 @@ async function routes(app: FastifyInstance) {
   )
 
   app.get<{
-    Querystring: { page?: number; limit?: number; filter?: string; assignableToGroupId?: string }
+    Querystring: {
+      page?: number
+      limit?: number
+      filter?: string
+      assignableToGroupId?: string
+      excludeSystem?: boolean
+    }
   }>(
     '/',
     {
@@ -151,6 +150,12 @@ async function routes(app: FastifyInstance) {
               format: 'uuid',
               description:
                 'Keep only the users that may be assigned to this group, i.e. omit its current members and any system user. Intended for pickers offering users to assign.'
+            },
+            excludeSystem: {
+              type: 'boolean',
+              default: false,
+              description:
+                'Omit system users (the guest account). Intended for pickers choosing an account to act as, which a system user cannot be.'
             },
             page: { type: 'integer', minimum: 1, default: 1 },
             limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 }
@@ -179,6 +184,7 @@ async function routes(app: FastifyInstance) {
       const { total, users } = await WIKI.models.users.getUsers({
         filter: req.query.filter ?? '',
         assignableToGroupId: req.query.assignableToGroupId ?? '',
+        excludeSystem: req.query.excludeSystem ?? false,
         page,
         limit
       })
@@ -323,6 +329,7 @@ async function routes(app: FastifyInstance) {
     '/whoami',
     {
       config: {
+        maintenance: 'open',
         scope: 'profile'
       },
       schema: {
@@ -388,7 +395,7 @@ async function routes(app: FastifyInstance) {
       schema: {
         summary: "Update the logged in user's own profile",
         description:
-          'Updates any subset of the profile fields; omitted ones are left unchanged. The name, location, job title and pronouns require profile editing to be enabled on this wiki (Administration → Authentication) and are refused otherwise; the language, time zone, date and time formats, appearance and accessibility settings are the user’s own and are always accepted. The email cannot be changed here, and neither can any field an administrator owns.',
+          'Updates any subset of the profile fields; omitted ones are left unchanged. The name, handle, location, job title and pronouns require profile editing to be enabled on this wiki (Administration → Authentication) and are refused otherwise; the language, time zone, date and time formats, appearance and accessibility settings are the user’s own and are always accepted. The email cannot be changed here, and neither can any field an administrator owns.',
         tags: ['Users'],
         body: {
           $ref: 'UserProfileUpdate#'
@@ -2021,6 +2028,69 @@ async function routes(app: FastifyInstance) {
       return {
         ok: true,
         message: 'User password updated successfully.'
+      }
+    }
+  )
+
+  /**
+   * RESET A USER'S 2FA
+   */
+  app.delete<{ Params: { userId: string } }>(
+    '/:userId/tfa',
+    {
+      config: {
+        permissions: ['manage:users']
+      },
+      schema: {
+        summary: "Reset a user's 2FA",
+        description:
+          'Forgets the 2FA secret under every authentication strategy, so the enrolled authenticator no longer works. Where 2FA is required — by the account, a group or the strategy — the next login asks the user to set it up again; otherwise they sign in without it. Sessions are not ended.',
+        tags: ['Users'],
+        params: {
+          type: 'object',
+          properties: {
+            userId: {
+              type: 'string',
+              format: 'uuid'
+            }
+          },
+          required: ['userId']
+        },
+        response: {
+          200: {
+            description: '2FA reset successfully',
+            type: 'object',
+            properties: {
+              ok: {
+                type: 'boolean'
+              },
+              message: {
+                type: 'string'
+              }
+            }
+          }
+        }
+      }
+    },
+    async (req, reply) => {
+      const systemUserRefusal = await systemUserGuard(req, req.params.userId)
+      if (systemUserRefusal) {
+        throw systemUserRefusal
+      }
+
+      const result = await WIKI.models.users.resetTfa(req.params.userId)
+      if (!result) {
+        return reply.notFound('User does not exist.')
+      }
+
+      await audit(req, 'admin', 'resetUserTfa', {
+        targetUserId: req.params.userId,
+        tfaDisabled: result.tfaDisabled
+      })
+
+      return {
+        ok: true,
+        message: 'User 2FA has been reset.'
       }
     }
   )

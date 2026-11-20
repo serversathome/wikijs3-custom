@@ -37,6 +37,13 @@ export interface SanitizableBlock {
   attributes: string[]
   /** Those of them that hold an address, which are scheme-checked — see `BlockProp.url`. */
   urlAttributes: string[]
+  /**
+   * The site's settings for the block's props — `BlockConfig` in `models/blocks.ts`, spelled out here
+   * because this file imports nothing. Only the locked entries matter to sanitizing: each is written
+   * onto every element of the block, replacing whatever the author gave it, and an empty one removes
+   * the attribute so that the block takes its own default.
+   */
+  config: Record<string, { value: string | number | boolean; locked: boolean }>
 }
 
 /**
@@ -303,6 +310,69 @@ const BASE_ALLOWED_ATTRIBUTES: Record<string, string[]> = {
 const ALLOWED_SCHEMES = ['http', 'https', 'mailto', 'tel', 'ftp']
 
 /**
+ * Every element the prose markdown can produce (`createProseMarkdown` in the frontend's
+ * `renderers/comment.js`), and nothing else: paragraphs and line breaks, emphasis and strikethrough,
+ * code spans and fenced code, quotes, lists and links. A change to the rules enabled there is a change
+ * here too.
+ */
+const PROSE_ALLOWED_TAGS = [
+  'p',
+  'br',
+  'em',
+  'strong',
+  's',
+  'code',
+  'pre',
+  'blockquote',
+  'ul',
+  'ol',
+  'li',
+  'a'
+]
+
+/**
+ * Sanitize HTML that is meant to be prose markdown, and only that.
+ *
+ * For a render that was produced in the browser from markdown which may hold only prose -- an idea on
+ * a feedback board -- by somebody who may write nothing else. The browser renders it with raw HTML
+ * off, but the render is sent to the server alongside the source and a request can carry any HTML in
+ * it, so the narrow set has to be enforced here rather than trusted: `sanitizeRender` would let
+ * through everything a page may hold, enabled blocks and their props included.
+ *
+ * A link's `rel` and `target` are set here rather than kept from the input, so that what a submitter
+ * may not opt out of (`nofollow ugc`) does not depend on their browser.
+ *
+ * @param sanitizeHtml The library, from the caller's own dependencies — see the top of this file
+ * @param html The render, as the browser produced it
+ * @param options.rel What every link leaves with
+ */
+export function sanitizeProse(
+  sanitizeHtml: typeof SanitizeHtml,
+  html: string,
+  { rel }: { rel: string }
+): string {
+  return sanitizeHtml(html, {
+    allowedTags: PROSE_ALLOWED_TAGS,
+    allowedAttributes: {
+      a: ['href', 'rel', 'target'],
+      ol: ['start'],
+      code: ['class']
+    },
+    // -> The fence's info string, which the page's highlighter reads
+    allowedClasses: { code: ['language-*'] },
+    allowedSchemes: ALLOWED_SCHEMES,
+    allowProtocolRelative: false,
+    transformTags: {
+      a: (tagName, attribs) => ({
+        tagName,
+        attribs: { ...attribs, rel, target: '_blank' }
+      })
+    },
+    nonTextTags: ['style', 'script', 'textarea', 'option', 'noscript']
+  })
+}
+
+/**
  * Strip everything a render may not carry.
  *
  * @param sanitizeHtml The library, from the caller's own dependencies — see the top of this file
@@ -329,8 +399,9 @@ export function sanitizeRender(
   const allowedTags = [...sanitizeHtml.defaults.allowedTags, ...BASE_ALLOWED_TAGS]
   const allowedAttributes: Record<string, string[]> = { ...BASE_ALLOWED_ATTRIBUTES }
   const urlAttributes = new Set(sanitizeHtml.defaults.allowedSchemesAppliedToAttributes)
+  const transformTags: Record<string, SanitizeHtml.Transformer> = {}
 
-  for (const { block, attributes, urlAttributes: blockUrlAttributes } of blocks) {
+  for (const { block, attributes, urlAttributes: blockUrlAttributes, config } of blocks) {
     const tag = `block-${block}`
     allowedTags.push(tag)
     /*
@@ -364,6 +435,29 @@ export function sanitizeRender(
       urlAttributes.add(name)
       urlAttributes.add(name.toLowerCase())
     }
+    /*
+      A locked prop is the administrator's, not the author's -- a private draw.io server, say, which
+      the point of locking is that no page can point somewhere else. Forced here rather than trusted
+      to the editor, since the source is text anybody can type an attribute into.
+
+      Done as a transform because the library applies those BEFORE it filters attributes, so a locked
+      value goes through the same allow list and scheme check as one an author wrote. Both spellings
+      of the name are cleared first, for the reason given above: what is stored is lowercased.
+    */
+    const locked = Object.entries(config).filter(([, setting]) => setting.locked)
+    if (locked.length > 0) {
+      transformTags[tag] = (tagName, attribs) => {
+        const forced = { ...attribs }
+        for (const [name, { value }] of locked) {
+          delete forced[name]
+          delete forced[name.toLowerCase()]
+          if (value !== '') {
+            forced[name] = String(value)
+          }
+        }
+        return { tagName, attribs: forced }
+      }
+    }
   }
 
   if (permissions.styles) {
@@ -394,6 +488,7 @@ export function sanitizeRender(
     allowVulnerableTags: permissions.styles,
     allowedSchemes: ALLOWED_SCHEMES,
     allowedSchemesAppliedToAttributes: [...urlAttributes],
+    transformTags,
     allowedSchemesByTag: {
       img: [...ALLOWED_SCHEMES, 'data', ...(blobImages ? ['blob'] : [])]
     },

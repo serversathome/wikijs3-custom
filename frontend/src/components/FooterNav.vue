@@ -31,6 +31,12 @@
     <div v-if="!props.generic && siteStore.footerExtra" class="site-footer-line site-footer-extra">
       <span v-html="footerExtraHtml" />
     </div>
+    <!-- -> Only where there is a choice to change: without analytics the banner only informs -->
+    <div v-if="canChangeConsent" class="site-footer-line">
+      <button type="button" class="site-footer-btn" @click="reopenConsentPrompt">
+        {{ t('common.cookieConsent.preferences') }}
+      </button>
+    </div>
   </div>
 </template>
 
@@ -76,9 +82,27 @@ const hasSiteFooter = computed(() => {
   return !props.generic && siteStore.company && siteStore.contentLicense
 })
 const footerExtraHtml = computed(() => renderFooter(siteStore.footerExtra))
+const canChangeConsent = computed(() => {
+  return !props.generic && siteStore.cookieConsent.isEnabled && siteStore.hasAnalytics
+})
 const isCopyright = computed(() => {
   return siteStore.contentLicense === 'alr'
 })
+
+// METHODS
+
+/**
+ * Imported on click rather than up front, to keep `composables/consent.js` off the main bundle's
+ * static import graph (see the banner in `App.vue`). A blocked load leaves the link doing nothing.
+ */
+async function reopenConsentPrompt() {
+  try {
+    const { reopenConsentPrompt: reopen } = await import('@/composables/consent')
+    reopen()
+  } catch (err) {
+    console.warn('Cookie preferences could not be loaded:', err)
+  }
+}
 </script>
 
 <style scoped>
@@ -103,6 +127,17 @@ const isCopyright = computed(() => {
   color: inherit;
 }
 
+.site-footer-btn {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+.site-footer-btn:hover,
+.site-footer-btn:focus-visible,
 .site-footer-line :deep(a:hover),
 .site-footer-line :deep(a:focus),
 .site-footer-extra :deep(a) {

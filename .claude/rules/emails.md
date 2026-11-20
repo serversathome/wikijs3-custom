@@ -1,8 +1,10 @@
 ---
 paths:
+  - "backend/api/locales.ts"
   - "backend/models/mail.ts"
   - "backend/models/locales.ts"
   - "backend/api/mail.ts"
+  - "backend/api/schemas/mail.ts"
   - "backend/notifications/mailer.ts"
   - "frontend/src/pages/AdminMail.vue"
 ---
@@ -18,6 +20,20 @@ reads. `MailTemplateData` is the closed list, held as typed literals rather than
 nothing sends a mail this wiki did not ask it to, so a template is part of the flow that uses it and
 a flow that gained one would gain code there anyway. A wiki with no SMTP settings is the normal case, which is why `isConfigured` is
 a question callers ask rather than something `send()` assumes.
+
+**Three ways to sign in to the SMTP server**, chosen by `mail.authType` (`MAIL_AUTH_TYPES`):
+`basic` (username and password, or none for a relay that trusts the address), `microsoft` and
+`google`. Both OAuth2 types are server-to-server on purpose — an Entra ID app registration with a
+client secret (the client credentials grant, fetched by `fetchMicrosoftToken` as nodemailer's
+`provisionCallback`, since nodemailer has no such grant), and a Google service account with
+domain-wide delegation (nodemailer's own `serviceClient` flow). Nobody consents in a browser, so
+there is no refresh token to store or rotate, and a worker thread just asks for a token of its own.
+A consent ("Connect your account") flow was left out for that reason: it would need a callback
+route, rotated refresh tokens written back from the worker, and Google's verification of the
+restricted `https://mail.google.com/` scope. The OAuth2 types sign in as `user`, or as the sender
+address when it is empty. Every credential — the password, the client secret, the service account
+key and the DKIM key — is masked by `api/mail.ts` (`SECRET_KEYS`), and missing credentials fail at
+send time with a message the test button shows, rather than making `isConfigured` false.
 
 **No mail is written in English in the code.** Every string lives in `locales/en.json` under
 `mail.*` and is translated by the same CrowdIn pipeline the interface uses, so a locale somebody
@@ -37,10 +53,17 @@ anything else the wiki writes for a person rather than for a machine belongs in 
   the key asked for falls back to `en` for that key alone, because a translation lags the release
   that added a string and a half-translated locale must not emit raw keys at a reader.
 - **String sets are cached; locale metadata already was.** `getLocales` holds the rows, and
-  `#stringsFor` holds the blobs — a few thousand entries the interface re-fetches per request and
-  has no reason to keep, but which a mail reads a handful of keys out of. `reloadCache` drops them,
-  which every install and update already calls and which the `reloadLocales` event runs on the other
-  instances of an HA set.
+  `#stringsFor` holds the blobs, which both a mail and `GET /locales/:code/strings`
+  (`interfaceStrings`, installed locales only) read. `reloadCache` drops them, which every install
+  and update already calls and which the `reloadLocales` event runs on the other instances of an HA
+  set.
+- **A translation is cached only as far as vue-i18n can show it.** On the way in, `#stringsFor`
+  leaves out every translated string that does not compile under `@intlify/message-compiler` (pinned
+  to the frontend's `vue-i18n` version; move them together) or that references a `{name}`, `{0}` or
+  `@:key` its English source does not, or is plural where the source is not. The reader gets the
+  English for that key instead of a component that throws on render, and the log names each one.
+  It is judged at cache time rather than at install time because `en` changes with every build.
+  `en` itself is never filtered; a source string that does not compile is logged on load.
 
 **One description, two bodies.** A template returns a `MailContent` — subject, title, paragraphs, at
 most one action, footer — and `htmlShell` and `textBody` are two renderings of it. Each template

@@ -40,6 +40,11 @@ import { SESSION_MAX_AGE_DAYS } from './models/sessions.ts'
 import { replayedKeyId } from './mcp/inject.ts'
 import { renderAppShell } from './helpers/appShell.ts'
 import {
+  MAINTENANCE_HEADER,
+  maintenanceRefusal,
+  maintenanceRefusalMessage
+} from './helpers/maintenance.ts'
+import {
   isPageUrl,
   originOf,
   RESERVED_ROOT_FILES,
@@ -416,12 +421,22 @@ async function initHTTPServer() {
     path: path.join(WIKI.ROOTPATH, 'assets'),
     name: 'favicon.ico'
   })
+  const assetsRoot = path.join(WIKI.ROOTPATH, 'assets/_assets')
+  // -> The frontend's renderer entry keeps a fixed name (see `frontend/vite.config.js`) but does
+  //    nothing except import a hashed chunk, so a copy held across an upgrade names a chunk that is
+  //    gone. It is revalidated on every use instead; it is a few bytes and answers 304 by ETag.
+  const rendererEntry = path.join(assetsRoot, 'renderer.js')
   app.register(fastifyStatic, {
     prefix: '/_assets/',
-    root: path.join(WIKI.ROOTPATH, 'assets/_assets'),
+    root: assetsRoot,
     index: false,
     maxAge: '7d',
-    decorateReply: false
+    decorateReply: false,
+    setHeaders: (reply, filePath) => {
+      if (filePath === rendererEntry) {
+        reply.header('Cache-Control', 'no-cache')
+      }
+    }
   })
 
   // ----------------------------------------
@@ -761,6 +776,27 @@ async function initHTTPServer() {
     addresses anonymous access was opened to is entitled to an answer.
   */
   app.addHook('onRequest', metricsHook)
+
+  // ----------------------------------------
+  // Maintenance Mode
+  // ----------------------------------------
+
+  /*
+    A site in maintenance refuses what its mode holds back, for every requester it applies to — see
+    `helpers/maintenance.ts` for what each mode refuses, and `config.maintenance` for the routes that
+    stay open. After the session and API key hooks, since who bypasses it is decided by their groups,
+    and before the body is read, for the reason the permission hook gives.
+
+    503, the status that says the refusal is temporary. The header names the mode, so that the app
+    can tell this from any other 503 and switch to the right view.
+  */
+  app.addHook('onRequest', async (req, reply) => {
+    const mode = maintenanceRefusal(req)
+    if (mode) {
+      reply.header(MAINTENANCE_HEADER, mode)
+      return reply.serviceUnavailable(maintenanceRefusalMessage(mode))
+    }
+  })
 
   // ----------------------------------------
   // SEO

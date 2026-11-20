@@ -13,6 +13,7 @@ import {
   originOf,
   splitLocalePath
 } from './common.ts'
+import { effectiveMaintenance } from './maintenance.ts'
 import { linksGridCards } from './pageLinks.ts'
 
 /**
@@ -103,13 +104,24 @@ const ADMIN_PATH_PREFIX = '/_admin'
  */
 const THEME_CSS_ID = 'theme-css-override'
 
+/**
+ * The cookie a reader's answer to the site's cookie consent banner is kept in, and the name BOTH
+ * sides use for it: `frontend/src/composables/consent.js` writes it, and only `all` — tracking
+ * accepted — lets `analyticsInjections` serve a tag. Strictly necessary itself, since it is what
+ * remembers that the reader said no.
+ */
+const CONSENT_COOKIE = 'wikiConsent'
+
 /** What the shell is enriched with, before it is put into the document. */
 interface ShellFragments {
   /** Replaces the shell's `<title>` and is appended to its `<head>`. */
   head: string
   /** Appended to the shell's `<body>`. Empty where there is no page body to show. */
   body: string
-  /** 200, or 404 for a page path with nothing a reader without a session may read at it. */
+  /**
+   * 200; 404 for a page path with nothing a reader without a session may read at it; 503 everywhere
+   * on a site closed for maintenance.
+   */
   status: number
   /** The `X-Robots-Tag` to answer with, or null where a crawler's default is what the site wants. */
   robots: string | null
@@ -810,9 +822,28 @@ async function fragmentsForBrowser(
  * through the app carries whatever tag the document it started from already loaded. There is no
  * getting that back without a per-provider way to stop one, which is the client-side layer this
  * deliberately does not have.
+ *
+ * **Nor for a reader who has not accepted tracking, on a site that asks.** Where the site's cookie
+ * consent banner is on (**Admin → General**), the tags go only to a request carrying
+ * `CONSENT_COOKIE` set to `all`, which the banner writes when a reader accepts tracking — and reloads
+ * the page to get them, the tags being served rather than added by the app. No answer yet is no
+ * consent: a first visit, a client that never runs the app to show a banner, and a provider's own
+ * crawler checking for its snippet all get a document without one. With the banner off, every
+ * document carries the tags as it always has, consent then being the administrator's business.
  */
-function analyticsInjections(siteId: string | undefined, urlPath: string): AnalyticsInjections {
+function analyticsInjections(
+  req: FastifyRequest,
+  siteId: string | undefined,
+  urlPath: string
+): AnalyticsInjections {
   if (urlPath === ADMIN_PATH_PREFIX || urlPath.startsWith(`${ADMIN_PATH_PREFIX}/`)) {
+    return { head: '', bodyStart: '' }
+  }
+  if (
+    siteId &&
+    WIKI.sites[siteId]?.config?.cookieConsent?.isEnabled === true &&
+    req.cookies[CONSENT_COOKIE] !== 'all'
+  ) {
     return { head: '', bodyStart: '' }
   }
   return WIKI.models.analytics.injectionsFor(siteId)
@@ -864,9 +895,12 @@ export async function renderAppShell(
   shell: string
 ): Promise<AppShellDocument> {
   const urlPath = req.raw.url!.split('?')[0]!
-  const fragments = isAnonymous(req)
-    ? await publicFragments(req, siteId, urlPath)
-    : await fragmentsForBrowser(req, siteId, urlPath)
+  const fragments =
+    effectiveMaintenance(req, siteId) === 'restricted'
+      ? closedFragments(siteId)
+      : isAnonymous(req)
+        ? await publicFragments(req, siteId, urlPath)
+        : await fragmentsForBrowser(req, siteId, urlPath)
 
   /*
     The head replaces the shell's own `<title>` where there is one and is appended to its `<head>`
@@ -874,7 +908,7 @@ export async function renderAppShell(
   */
   const withoutTitle = shell.replace(/[ \t]*<title>[\s\S]*?<\/title>\n?/i, '')
   const injected = themeInjections(siteId)
-  const tags = analyticsInjections(siteId, urlPath)
+  const tags = analyticsInjections(req, siteId, urlPath)
   const head = [fragments.head, tags.head, injected.head].filter(Boolean).join('\n  ')
   /*
     Immediately after the opening `<body>`, which is the one slot that is not the end of something:
@@ -891,6 +925,25 @@ export async function renderAppShell(
     .replace('</body>', () => `${fragments.body}${injected.body}</body>`)
 
   return { html, status: fragments.status, robots: fragments.robots }
+}
+
+/**
+ * The fragments of a site closed for maintenance (`restricted`), for a requester it holds back.
+ *
+ * The site's own head and nothing about the page at the URL: no title, no description, no copy of
+ * the body — the app is about to show the maintenance page in place of everything, and a client that
+ * will not run it must not be handed the content the closure is keeping back. 503 at every path,
+ * which tells a crawler the site is down for now rather than that its pages are gone, and `noindex`
+ * so that nothing it fetches meanwhile is filed as the page. Never cached: the public fragments
+ * cached for the same URL are the open site's, and are served again the moment it reopens.
+ */
+function closedFragments(siteId: string | undefined): ShellFragments {
+  return {
+    head: headForSite(siteId ? WIKI.sites[siteId]?.config : undefined),
+    body: '',
+    status: 503,
+    robots: 'noindex, nofollow'
+  }
 }
 
 /** The cached half: one URL's public fragments, keeping the namespace under its ceiling. */

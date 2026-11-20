@@ -9,6 +9,7 @@ async function routes(app: FastifyInstance) {
     '/',
     {
       config: {
+        maintenance: 'open',
         publicAccess: true
       },
       schema: {
@@ -311,6 +312,7 @@ async function routes(app: FastifyInstance) {
     '/:code/strings',
     {
       config: {
+        maintenance: 'open',
         publicAccess: true
       },
       schema: {
@@ -319,7 +321,7 @@ async function routes(app: FastifyInstance) {
       }
     },
     async (req) => {
-      return WIKI.models.locales.getStrings(req.params.code)
+      return WIKI.models.locales.interfaceStrings(req.params.code)
     }
   )
 }

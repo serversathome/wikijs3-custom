@@ -5,25 +5,60 @@ import { setTimeout } from 'node:timers/promises'
 import { sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
-import { Pool, type PoolClient, type PoolConfig } from 'pg'
+import { Pool, type PoolConfig } from 'pg'
 import { parse } from 'pg-connection-string'
 import semver from 'semver'
 
 import { relations } from '../db/relations.ts'
 import { flags } from '../models/flags.ts'
 import { createDeferred } from '../helpers/common.ts'
-import { createNotifier } from '../helpers/pubsub.ts'
+import { createChannel } from '../helpers/pubsub.ts'
 import maintenance from './maintenance.ts'
 // import migrationSource from '../db/migrator-source.js'
 
 /**
- * Sends the event bus's cross-instance notifications, one at a time.
+ * Inbound events replayed on this instance after its event bus connection was lost and replaced.
+ *
+ * Each of these says "something stored changed, read it back", and is harmless to act on when nothing
+ * did, so an instance that may have missed one simply acts on all of them. `flushCaches` and
+ * `disconnectWebsockets` are left out: they are an administrator's one-off actions, not state that
+ * drifts, and replaying them would purge every disk cache and drop every editor on a network blip.
+ */
+const RESYNC_EVENTS = [
+  'reloadConfig',
+  'reloadLocales',
+  'reloadSites',
+  'reloadStorageTargets',
+  'reloadFeedbackBoards',
+  'reloadBlocks'
+]
+
+/**
+ * The event bus's connection: LISTEN on `wiki` for what other instances publish, NOTIFY for what this
+ * one does.
  *
  * Built here rather than on the object below because `notifyViaDB` is handed to Emittery as a bare
- * listener and so has no `this` to reach it through. The client is read per send for the same reason
- * it is elsewhere: it does not exist until `subscribeToNotifications`.
+ * listener and so has no `this` to reach it through.
  */
-const notifier = createNotifier(() => WIKI.dbManager.pubsubClient, 'event bus')
+const channel = createChannel({
+  channel: 'wiki',
+  role: 'EVENTS',
+  label: 'event bus',
+  onNotification(payload) {
+    const decoded = JSON.parse(payload)
+    if ('event' in decoded && decoded.source !== WIKI.INSTANCE_ID) {
+      WIKI.logger.info(`Received event ${decoded.event} from instance ${decoded.source}: [ OK ]`)
+      WIKI.events.inbound.emit(decoded.event, decoded.value)
+    }
+  },
+  async onResubscribe() {
+    for (const event of RESYNC_EVENTS) {
+      await WIKI.events.inbound.emit(event).catch((err: any) => {
+        WIKI.logger.warn(`Failed to replay ${event} after reconnecting: ${err.message}`)
+      })
+    }
+  }
+})
 
 /**
  * Postgres extensions the schema depends on, installed before the migrations run.
@@ -45,6 +80,18 @@ const REQUIRED_EXTENSIONS = ['ltree', 'pg_trgm']
  * included, so they are compared case-sensitively against `information_schema`.
  */
 const LEGACY_TABLES = ['knex_migrations', 'searchEngines']
+
+/**
+ * Tables that together mark a 2.x installation in ANOTHER schema of the same database — 2.x installs
+ * into whatever schema its connection lands in, `public` unless told otherwise, while 3.x defaults to
+ * `wiki`, so pointing a 3.x config at the 2.x database finds nothing in its own schema at all.
+ *
+ * Two of these in one schema, rather than one: `knex_migrations` is simply Knex's ledger, and an
+ * unrelated application sharing the database may well have one. The other three are 2.x tables 3.x
+ * never created, and two at once is no coincidence -- while still catching a 2.x schema whose ledger
+ * somebody dropped.
+ */
+const LEGACY_SCHEMA_TABLES = ['knex_migrations', 'searchEngines', 'commentProviders', 'pageTree']
 
 /**
  * Query logger, consulted by Drizzle on every query.
@@ -81,7 +128,6 @@ export type WikiDb = ReturnType<typeof createDb>
  */
 export default {
   pool: null as Pool | null,
-  pubsubClient: null as PoolClient | null,
   config: null as PoolConfig | null,
   dbName: null as string | null | undefined,
   VERSION: null as string | null,
@@ -170,6 +216,23 @@ export default {
       options: `-c search_path=${WIKI.config.db.schema} -c timezone=UTC`
     })
 
+    /*
+      A connection that drops — a failover, a proxy timing it out, `pg_terminate_backend` — makes its
+      client emit `error`, and an `error` event with no listener ends the process. pg-pool listens on
+      the clients it holds idle and re-emits on the pool, which has no listener of its own either; a
+      client checked out (a transaction, the storage lock, the LISTEN connections) has none at all
+      until somebody adds one. So every client gets one the moment it exists, and whoever is using it
+      learns of the loss the ordinary way: its query fails, and pg-pool discards the client on release.
+      The pool's listener is only there so that its re-emit of the same error is not fatal; the
+      client's has already logged it.
+    */
+    this.pool.on('connect', (client) => {
+      client.on('error', (err) => {
+        WIKI.logger.warn(`Lost a database connection: ${err.message}`)
+      })
+    })
+    this.pool.on('error', () => {})
+
     const db = createDb(this.pool)
 
     // Connect
@@ -212,27 +275,7 @@ export default {
    * Subscribe to database LISTEN / NOTIFY for multi-instances events
    */
   async subscribeToNotifications(): Promise<void> {
-    const connectionAppName = `Wiki.js - ${WIKI.INSTANCE_ID}:EVENTS`
-    this.pubsubClient = await this.pool!.connect()
-    await this.pubsubClient.query(`SET application_name = '${connectionAppName}'`)
-
-    // -> Outbound events handling
-
-    await this.pubsubClient.query('LISTEN wiki')
-    this.pubsubClient.on('notification', (msg) => {
-      if (msg.channel !== 'wiki') {
-        return
-      }
-      try {
-        const decoded = JSON.parse(msg.payload!)
-        if ('event' in decoded && decoded.source !== WIKI.INSTANCE_ID) {
-          WIKI.logger.info(
-            `Received event ${decoded.event} from instance ${decoded.source}: [ OK ]`
-          )
-          WIKI.events.inbound.emit(decoded.event, decoded.value)
-        }
-      } catch {}
-    })
+    await channel.open()
     // -> Cast because `onAny` types the event as every pair the map allows plus Emittery's own meta
     //    events, and this listener is written to the one shape they have in common
     WIKI.events.outbound.onAny(this.notifyViaDB as any)
@@ -250,14 +293,9 @@ export default {
    * Unsubscribe from database LISTEN / NOTIFY
    */
   async unsubscribeFromNotifications(): Promise<void> {
-    if (this.pubsubClient) {
-      WIKI.events.outbound.offAny(this.notifyViaDB as any)
-      WIKI.events.inbound.clearListeners()
-      // -> Whatever the last events queued goes out before the client goes: releasing it from under a
-      //    notification in flight would fail that one for no reason
-      await notifier.drained()
-      this.pubsubClient.release(true)
-    }
+    WIKI.events.outbound.offAny(this.notifyViaDB as any)
+    WIKI.events.inbound.clearListeners()
+    await channel.close()
   },
   /**
    * Publish event via database NOTIFY
@@ -269,8 +307,7 @@ export default {
    * @param event Event fired, and its payload
    */
   notifyViaDB({ name, data }: { name?: string; data?: unknown }): void {
-    notifier.send(
-      'wiki',
+    channel.send(
       JSON.stringify({
         source: WIKI.INSTANCE_ID,
         event: name,
@@ -309,20 +346,63 @@ export default {
    * migrations would run over the 2.x tables they know nothing about and leave a database that is
    * neither version. Exits rather than throws — a 2.x database is not something a retry or a later
    * boot phase can recover from, and the operator has to point the config at a fresh one.
+   *
+   * Two questions, asked of the catalog (`pg_tables`) rather than `information_schema`, which lists
+   * only the tables the connecting role has a privilege on — and a 2.x installation is as likely as
+   * not to belong to a different role:
+   *
+   *   - **The configured schema** holding either of `LEGACY_TABLES` is a 2.x database, full stop.
+   *   - **Any other schema** holding two of `LEGACY_SCHEMA_TABLES` is a 2.x installation beside it,
+   *     which is what pointing a 3.x config at the 2.x database looks like when the two disagree about
+   *     the schema (2.x in `public`, 3.x in `wiki`): the configured schema is empty, and without this
+   *     the boot would carry on and lay a fresh, empty wiki down next to the old one. Only refused
+   *     when the configured schema has no 3.x installation yet — no `migrations` ledger — so that a
+   *     3.x already running beside an old 2.x schema, deliberately or not, keeps booting; it is
+   *     warned about instead.
    */
   async checkForLegacyInstall(db: WikiDb): Promise<void> {
-    const res = await db.execute(sql`
-      SELECT table_name FROM information_schema.tables
-      WHERE table_schema = ${WIKI.config.db.schema} AND table_name IN ${LEGACY_TABLES}
+    const schema = WIKI.config.db.schema
+    const own = await db.execute(sql`
+      SELECT tablename FROM pg_catalog.pg_tables
+      WHERE schemaname = ${schema} AND tablename IN ${LEGACY_TABLES}
       LIMIT 1
     `)
-    if (res.rows.length > 0) {
+    if (own.rows.length > 0) {
       WIKI.logger.error('ERROR: UPGRADING FROM A 2.x INSTALLATION IS NOT YET SUPPORTED. Exiting...')
       WIKI.logger.error(
-        `Found the Wiki.js 2.x table "${res.rows[0].table_name}" in schema "${WIKI.config.db.schema}".`
+        `Found the Wiki.js 2.x table "${own.rows[0].tablename}" in schema "${schema}".`
       )
       process.exit(1)
     }
+
+    const elsewhere = await db.execute(sql`
+      SELECT schemaname FROM pg_catalog.pg_tables
+      WHERE schemaname NOT IN ('pg_catalog', 'information_schema', ${schema})
+        AND tablename IN ${LEGACY_SCHEMA_TABLES}
+      GROUP BY schemaname
+      HAVING count(*) >= 2
+      ORDER BY schemaname
+    `)
+    if (elsewhere.rows.length < 1) {
+      return
+    }
+    const legacySchemas = elsewhere.rows.map((row) => `"${row.schemaname}"`).join(', ')
+    const installed = await db.execute(sql`
+      SELECT 1 FROM pg_catalog.pg_tables
+      WHERE schemaname = ${schema} AND tablename = 'migrations'
+      LIMIT 1
+    `)
+    if (installed.rows.length > 0) {
+      WIKI.logger.warn(
+        `A Wiki.js 2.x installation was found in schema ${legacySchemas} of this database. It is not used by this installation, which is in schema "${schema}".`
+      )
+      return
+    }
+    WIKI.logger.error('ERROR: UPGRADING FROM A 2.x INSTALLATION IS NOT YET SUPPORTED. Exiting...')
+    WIKI.logger.error(
+      `Found a Wiki.js 2.x installation in schema ${legacySchemas} of this database. This installation is configured for schema "${schema}" and would be created empty beside it. Point the database configuration at a separate, empty database to install Wiki.js 3.x.`
+    )
+    process.exit(1)
   },
   /**
    * Migrate DB Schemas

@@ -69,9 +69,14 @@ before working in an area — and add to it there, not here:
   `distributing-blocks` (the `.wkblock` package), `emails`, `excalidraw`, `analytics`,
   `live-notes`, `audit-log`, `notifications`, `mcp`, `page-lifecycle`, `glossary`,
   `feedback-boards`, `metrics`, `icons`, `page-paths` (path segments, the ltree encoding),
-  `personal-access-tokens` (`config.scope`, `requestUser(req)`) and `image-editor` (the file
-  manager's image editor and resize). **Fork:** `apprise` (Admin → Notifications → Apprise); every fork
-  change is listed in `FORK.md`.
+  `personal-access-tokens` (`config.scope`, `requestUser(req)`), `image-editor` (the file
+  manager's image editor and resize), `maintenance` (a site's read-only / restricted mode,
+  `config.maintenance` on routes), `block-config` (an admin's per-site block defaults and locks)
+  `cli` (the management CLI, `backend/cli.ts`), `confluence-import` (Import from Confluence:
+  both backup formats, who decides paths and who decides content), `dokuwiki-import` (Import from
+  DokuWiki: the data directory as the source, namespaces as folders) and `xwiki-import` (Import from
+  XWiki: the XAR as the source, spaces as folders, references keyed alike on both sides).
+  **Fork:** `apprise` (Admin → Notifications → Apprise); every fork change is listed in `FORK.md`.
 - **Procedures** — `.claude/skills/`: `throwaway-instance` boots, scripts and tears down a
   disposable instance.
 
@@ -90,6 +95,7 @@ npm run typecheck        # tsc — type check only, never emits
 npm run typecheck:watch
 npm run db-generate -- --name=foo-column   # drizzle-kit generate — after editing db/schema.ts
 npm run db-up            # drizzle-kit up
+npm run cli -- <command> # management CLI (reset-password, set-hostname, info, …); also backend/cli.ts
 
 # frontend
 npm run dev            # vite dev server on :3001 (needs backend running on :3000)
@@ -312,9 +318,10 @@ Consequences worth knowing:
   every page under that entry: a page that inherits is editing its ancestor's menu, and a page with
   no overriding ancestor is editing the site-wide one, which `navigation.menuOwnerRef` reports as the
   home page's path. So a rule over `/guides` lets that section re-point its own pages without letting
-  it rewrite the menu handed down to it. `api/navigation.ts` has the pair of checks
-  (`mayManageNavAt`, `mayEditNavItems`), and the `inherited` route answers `canEditItems` so the
-  editor knows which of its two halves to offer.
+  it rewrite the menu handed down to it. The navigation model has the pair of checks
+  (`mayManageAt`, `mayEditItemsAt`), each handed the caller's own `manage:navigation` question so
+  that `api/navigation.ts` and the MCP navigation tools ask the same thing, and the `inherited` route
+  answers `canEditItems` so the editor knows which of its two halves to offer.
 - **`read:glossary` and `manage:glossary` ignore the path.** They are the page permissions about a
   site and a locale rather than a page (`LOCALE_PERMISSIONS` in `models/groups.ts`): every rule naming
   one that is scoped to the site and locale applies, regardless of what it matches, and mode alone decides —
