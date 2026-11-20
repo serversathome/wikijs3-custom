@@ -678,7 +678,8 @@ export const icons = pgTable(
 
 // IMPORT SESSIONS ---------------------
 /**
- * One run of **Administration → Utilities → Import from Wiki.js 2.x**, from the moment the operator
+ * One run of **Administration → Utilities → Import from Wiki.js 2.x** (or **Import from Confluence**,
+ * **Import from DokuWiki** or **Import from XWiki**), from the moment the operator
  * presses Start until the package has been walked.
  *
  * A row rather than memory, for two reasons that both come from the import living in a browser tab:
@@ -705,7 +706,12 @@ export const importSessions = pgTable(
      * with no natural key to match on. See `dev/specs/wkbackup.md` §4.
      */
     namespace: uuid().notNull(),
-    /** `manifest.source.kind`. Only `wikijs2` is implemented. */
+    /**
+     * `wikijs2` (`manifest.source.kind` of a `.wkbackup`), `confluence` for a Confluence backup the
+     * browser reads itself — whose streams `models/importConfluence.ts` writes — `dokuwiki` for a
+     * DokuWiki data directory read the same way, written by `models/importDokuwiki.ts`, or `xwiki` for
+     * an XWiki XAR, written by `models/importXwiki.ts`.
+     */
     source: varchar({ length: 32 }).notNull(),
     /** `[{ sourceId, siteId }]` — each package site paired with the target site it lands in. */
     sites: jsonb().notNull().default([]),
@@ -770,6 +776,41 @@ export const importIdMap = pgTable(
     targetId: uuid().notNull()
   },
   (table) => [primaryKey({ columns: [table.sessionId, table.entity, table.sourceId] })]
+)
+
+/**
+ * What an import's records refer to each other by, when that is not an id of this wiki.
+ *
+ * Written by **Import from Confluence** (`models/importConfluence.ts`), **Import from DokuWiki**
+ * (`models/importDokuwiki.ts`) and **Import from XWiki** (`models/importXwiki.ts`). A Confluence body names a page by its space and title, an attachment
+ * by its file name, a person by their account id, and its inline comments are anchored by a marker
+ * inside a page body that the comments stream never sees; a DokuWiki body names a page or a file by
+ * an id relative to its own namespace; an XWiki body names a document by a reference that may have to
+ * be tried as several documents in turn. `importIdMap` cannot hold any of that: its target is a row id here, and these answers are a path, a
+ * display name, a described passage.
+ *
+ * The browser uploads the whole index before the first page, since a link points forward as often as
+ * back and every path is known before anything is written. Then each batch of pages reads only the
+ * keys its own bodies mention, in one query per kind.
+ *
+ * Rows go with the session, as `importIdMap`'s do.
+ */
+export const importRefs = pgTable(
+  'importRefs',
+  {
+    sessionId: uuid()
+      .notNull()
+      .references(() => importSessions.id, { onDelete: 'cascade' }),
+    /**
+     * Confluence: `page`, `pageId`, `file`, `user`, `space` or `anchor` (`models/importConfluence.ts`).
+     * DokuWiki: `page`, `namespace`, `file` or `interwiki` (`models/importDokuwiki.ts`).
+     * XWiki: `page`, `space`, `file` or `user` (`models/importXwiki.ts`).
+     */
+    kind: varchar({ length: 32 }).notNull(),
+    key: text().notNull(),
+    value: jsonb().notNull()
+  },
+  (table) => [primaryKey({ columns: [table.sessionId, table.kind, table.key] })]
 )
 
 // JOB HISTORY -------------------------

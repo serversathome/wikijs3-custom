@@ -246,6 +246,23 @@ function strategyEnrollGroups(strategy: AuthStrategy): string[] {
 }
 
 /**
+ * Turn 2FA off and forget the secret under every strategy of a user's `auth`, in place — a
+ * half-finished setup (a secret never activated) included.
+ *
+ * @returns Whether 2FA had been active under any of them
+ */
+function clearTfa(auth: Record<string, any>): boolean {
+  let wasActive = false
+  for (const [strategyId, config] of Object.entries(auth)) {
+    if (config?.tfaIsActive || config?.tfaSecret) {
+      wasActive = wasActive || Boolean(config.tfaIsActive)
+      auth[strategyId] = { ...config, tfaIsActive: false, tfaSecret: '' }
+    }
+  }
+  return wasActive
+}
+
+/**
  * Count a wrong 2FA code against a continuation token, destroying the token once `maxTfaAttempts`
  * have been used up — the client then has nothing left to continue with and has to start over.
  *
@@ -449,6 +466,7 @@ class Users {
    *
    * @param filter Matched literally against name and email, case-insensitively
    * @param assignableToGroupId Keep only the users that may be assigned to this group
+   * @param excludeSystem Leave out system users (the guest account)
    * @returns The page of users plus the total number matching the filter
    */
   /**
@@ -501,11 +519,13 @@ class Users {
   async getUsers({
     filter = '',
     assignableToGroupId = '',
+    excludeSystem = false,
     page = 1,
     limit = 20
   }: {
     filter?: string
     assignableToGroupId?: string
+    excludeSystem?: boolean
     page?: number
     limit?: number
   } = {}): Promise<UserPage> {
@@ -514,10 +534,13 @@ class Users {
       const pattern = `%${escapeLikePattern(filter)}%`
       conditions.push(or(ilike(usersTable.name, pattern), ilike(usersTable.email, pattern))!)
     }
-    if (assignableToGroupId) {
-      // -> Members of the group have nothing left to assign, and system users (the guest account)
-      //    have a fixed membership that `POST /groups/:id/users/:id` refuses to change
+    // -> System users (the guest account) have a fixed membership that `POST /groups/:id/users/:id`
+    //    refuses to change, and are nobody a picker could hand anything to
+    if (excludeSystem || assignableToGroupId) {
       conditions.push(eq(usersTable.isSystem, false))
+    }
+    if (assignableToGroupId) {
+      // -> Members of the group have nothing left to assign
       conditions.push(
         notExists(
           WIKI.db
@@ -1282,6 +1305,91 @@ class Users {
   }
 
   /**
+   * Put an account back in the hands of whoever is given the new password, as the management CLI's
+   * `reset-password` does: the one way back in for an administrator who has lost every other.
+   *
+   * Everything that could stand between that password and a signed-in session is taken away in the
+   * same write, since a recovery that leaves any of it behind is not one:
+   *
+   * - the local password is replaced, and must be changed at the next login;
+   * - password login is turned back on (`restrictLogin`), or the password would be refused;
+   * - two-factor authentication is turned off under EVERY strategy, secret and all, since a lost
+   *   authenticator is the usual reason for being here. A group or strategy that requires 2FA makes
+   *   the user enrol again on the way in, which is the point;
+   * - every passkey is removed — a device that may be in somebody else's hands is a way in too.
+   *
+   * Then every session is ended. Not the user's personal access tokens, which are the caller's
+   * decision (`personalTokens.removeAllForUser`).
+   *
+   * Unlike `disableTfa`, nothing here asks whether 2FA is enforced: the caller has already decided,
+   * from outside the wiki's own permission model, that this account is to be let back in.
+   *
+   * @returns What was taken away, or null if the user does not exist
+   */
+  async recoverAccount({
+    id,
+    newPassword
+  }: {
+    id: string
+    newPassword: string
+  }): Promise<{ tfaDisabled: boolean; passkeysRemoved: number } | null> {
+    const user = await this.getById(id)
+    if (!user) {
+      return null
+    }
+
+    const localStrategyId = WIKI.data.systemIds.localAuthId
+    const auth = (user.auth ?? {}) as Record<string, any>
+    const tfaDisabled = clearTfa(auth)
+    auth[localStrategyId] = {
+      tfaRequired: false,
+      ...auth[localStrategyId],
+      password: await bcrypt.hash(newPassword, 12),
+      mustChangePwd: true,
+      restrictLogin: false,
+      tfaIsActive: false,
+      tfaSecret: ''
+    }
+    const passkeysRemoved = (((user.passkeys ?? {}) as Record<string, any>).authenticators ?? [])
+      .length
+
+    await WIKI.db
+      .update(usersTable)
+      .set({ auth, passkeys: { authenticators: [] }, updatedAt: sql`now()` })
+      .where(eq(usersTable.id, id))
+    await WIKI.models.sessions.clearSessionsFromUser(id)
+    return { tfaDisabled, passkeysRemoved }
+  }
+
+  /**
+   * An administrator's reset of a user's two-factor authentication: the secret is forgotten under
+   * EVERY strategy, so the authenticator the user enrolled no longer works anywhere.
+   *
+   * Unlike `disableTfa`, nothing here asks whether 2FA is enforced — that is the point. Where a
+   * group, the strategy or the account itself requires 2FA, the next login asks the user to enrol
+   * again with a new QR code; where nothing does, the account simply signs in without it.
+   *
+   * Sessions are left alone: a reset is about the next login, not about who is signed in now.
+   *
+   * @returns Whether 2FA had been active under any strategy, or null if the user does not exist
+   */
+  async resetTfa(id: string): Promise<{ tfaDisabled: boolean } | null> {
+    const user = await this.getById(id)
+    if (!user) {
+      return null
+    }
+
+    const auth = (user.auth ?? {}) as Record<string, any>
+    const tfaDisabled = clearTfa(auth)
+    await WIKI.db
+      .update(usersTable)
+      .set({ auth, updatedAt: sql`now()` })
+      .where(eq(usersTable.id, id))
+    WIKI.models.flags.authDebug(`User ${id} <${user.email}> had 2FA reset by an administrator`)
+    return { tfaDisabled }
+  }
+
+  /**
    * The authentication providers linked to a user, as its own profile page shows them.
    *
    * Reshaped from the stored `auth` blob the same way `getUserDetail()` does it, but reporting only
@@ -1923,6 +2031,8 @@ class Users {
       .set({ auth, ...(metaChanged ? { meta: user.meta } : {}), updatedAt: sql`now()` })
       .where(eq(usersTable.id, user.id))
 
+    await this.applyProviderHandle(user, profile, strategy)
+
     // -> After the account exists and before `afterLoginChecks`, which reads the memberships back out
     //    to resolve this session's permissions and its redirect
     await this.applyProviderGroups(user.id, profile, strategy, req)
@@ -1938,6 +2048,54 @@ class Users {
       { ip, siteId },
       { skipTFA: true, skipChangePwd: true },
       req
+    )
+  }
+
+  /**
+   * Write the handle the provider reported over the account's own, when the module mapped one.
+   *
+   * Never fails the login. A handle is unique across the wiki and held to `HANDLE_PATTERN`, and a
+   * provider is not bound by either — its usernames may carry dots or an `@`, and somebody here may
+   * already have picked the same one. Either way the account keeps the handle it has, and the reason
+   * goes to the auth debug log, where an administrator chasing a missing handle will look.
+   */
+  private async applyProviderHandle(
+    user: { id: string; handle: string | null },
+    profile: ProviderProfile,
+    strategy: AuthStrategy
+  ): Promise<void> {
+    if (typeof profile.handle !== 'string') {
+      return
+    }
+    const trimmed = profile.handle.trim()
+    if (trimmed.length > 0 && !HANDLE_PATTERN.test(trimmed)) {
+      WIKI.models.flags.authDebug(
+        `Handle "${trimmed}" from strategy ${strategy.id} is not a valid handle, so user ${user.id} keeps "${user.handle ?? ''}"`
+      )
+      return
+    }
+    const handle = trimmed.length > 0 ? trimmed : null
+    if (handle === user.handle) {
+      return
+    }
+    try {
+      await WIKI.db
+        .update(usersTable)
+        .set({ handle, updatedAt: sql`now()` })
+        .where(eq(usersTable.id, user.id))
+    } catch (err: any) {
+      const cause = err.cause ?? err
+      if (cause.code === '23505' && cause.constraint === 'users_handle_idx') {
+        WIKI.models.flags.authDebug(
+          `Handle "${handle}" from strategy ${strategy.id} is already held by another account, so user ${user.id} keeps "${user.handle ?? ''}"`
+        )
+        return
+      }
+      throw err
+    }
+    user.handle = handle
+    WIKI.models.flags.authDebug(
+      `Updated handle of user ${user.id} to "${handle ?? ''}" from strategy ${strategy.id}`
     )
   }
 

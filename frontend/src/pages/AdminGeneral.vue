@@ -557,37 +557,133 @@
                 :aria-label="t(`admin.general.bannerEnabled`)" />
             </w-item-section>
           </w-item>
+          <!--
+            The title and contents are also what a maintenance mode shows -- as the banner, or as the
+            maintenance page -- whether or not the banner itself is on, so they stay editable then too.
+          -->
+          <template v-if="state.config.banner.isEnabled || state.config.maintenance.mode !== 'off'">
+            <w-separator class="my-2" inset />
+            <w-item>
+              <blueprint-icon icon="typography" />
+              <w-item-section>
+                <w-item-label>{{ t(`admin.general.bannerTitle`) }}</w-item-label>
+                <w-item-label caption>{{ t(`admin.general.bannerTitleHint`) }}</w-item-label>
+              </w-item-section>
+              <w-item-section>
+                <w-input
+                  outlined
+                  v-model="state.config.banner.title"
+                  dense
+                  :aria-label="t(`admin.general.bannerTitle`)" />
+              </w-item-section>
+            </w-item>
+            <w-separator class="my-2" inset />
+            <w-item>
+              <blueprint-icon icon="markdown" class="self-start" />
+              <w-item-section>
+                <w-item-label>{{ t(`admin.general.bannerContent`) }}</w-item-label>
+                <w-item-label caption>{{ t(`admin.general.bannerContentHint`) }}</w-item-label>
+              </w-item-section>
+            </w-item>
+            <w-item>
+              <w-item-section>
+                <util-code-editor
+                  v-model="state.config.banner.content"
+                  language="markdown"
+                  :aria-label="t(`admin.general.bannerContent`)" />
+              </w-item-section>
+            </w-item>
+          </template>
           <w-separator class="my-2" inset />
           <w-item>
-            <blueprint-icon icon="typography" />
+            <blueprint-icon icon="administrative-tools" />
             <w-item-section>
-              <w-item-label>{{ t(`admin.general.bannerTitle`) }}</w-item-label>
-              <w-item-label caption>{{ t(`admin.general.bannerTitleHint`) }}</w-item-label>
+              <w-item-label>{{ t(`admin.general.maintenanceMode`) }}</w-item-label>
+              <w-item-label caption>{{ t(`admin.general.maintenanceModeHint`) }}</w-item-label>
             </w-item-section>
-            <w-item-section>
-              <w-input
-                outlined
-                v-model="state.config.banner.title"
-                dense
-                :aria-label="t(`admin.general.bannerTitle`)" />
-            </w-item-section>
-          </w-item>
-          <w-separator class="my-2" inset />
-          <w-item>
-            <blueprint-icon icon="markdown" class="self-start" />
-            <w-item-section>
-              <w-item-label>{{ t(`admin.general.bannerContent`) }}</w-item-label>
-              <w-item-label caption>{{ t(`admin.general.bannerContentHint`) }}</w-item-label>
+            <w-item-section class="flex-none">
+              <w-btn-toggle
+                v-model="state.config.maintenance.mode"
+                push
+                glossy
+                no-caps
+                toggle-color="primary"
+                :options="maintenanceModes" />
             </w-item-section>
           </w-item>
-          <w-item>
+          <template v-if="state.config.maintenance.mode !== 'off'">
+            <w-separator class="my-2" inset />
+            <w-item>
+              <blueprint-icon icon="user-groups" />
+              <w-item-section>
+                <w-item-label>{{ t(`admin.general.maintenanceBypass`) }}</w-item-label>
+                <w-item-label caption>{{ t(`admin.general.maintenanceBypassHint`) }}</w-item-label>
+              </w-item-section>
+              <w-item-section>
+                <w-select
+                  v-model="state.config.maintenance.bypassGroups"
+                  outlined
+                  dense
+                  :options="state.groups"
+                  multiple
+                  map-options
+                  emit-value
+                  option-value="id"
+                  option-label="name"
+                  options-dense
+                  :aria-label="t(`admin.general.maintenanceBypass`)" />
+              </w-item-section>
+            </w-item>
+          </template>
+        </w-card>
+        <!-- ----------------------- -->
+        <!-- Cookie Consent -->
+        <!-- ----------------------- -->
+        <w-card class="pb-2 mt-4">
+          <w-card-header>{{ t('admin.general.cookieConsent') }}</w-card-header>
+          <w-item tag="label">
+            <blueprint-icon icon="cookies" />
             <w-item-section>
-              <util-code-editor
-                v-model="state.config.banner.content"
-                language="markdown"
-                :aria-label="t(`admin.general.bannerContent`)" />
+              <w-item-label>{{ t(`admin.general.cookieConsentEnabled`) }}</w-item-label>
+              <w-item-label caption>{{ t(`admin.general.cookieConsentEnabledHint`) }}</w-item-label>
+            </w-item-section>
+            <w-item-section avatar>
+              <w-toggle
+                v-model="state.config.cookieConsent.isEnabled"
+                :aria-label="t(`admin.general.cookieConsentEnabled`)" />
             </w-item-section>
           </w-item>
+          <w-item v-if="state.config.cookieConsent.isEnabled">
+            <w-item-section>
+              <w-item-label caption>
+                {{
+                  state.hasAnalytics
+                    ? t('admin.general.cookieConsentAnalyticsOn')
+                    : t('admin.general.cookieConsentAnalyticsOff')
+                }}
+              </w-item-label>
+            </w-item-section>
+          </w-item>
+          <template v-if="state.config.cookieConsent.isEnabled">
+            <w-separator class="my-2" inset />
+            <w-item>
+              <blueprint-icon icon="markdown" class="self-start" />
+              <w-item-section>
+                <w-item-label>{{ t(`admin.general.cookieConsentMessage`) }}</w-item-label>
+                <w-item-label caption>{{
+                  t(`admin.general.cookieConsentMessageHint`)
+                }}</w-item-label>
+              </w-item-section>
+            </w-item>
+            <w-item>
+              <w-item-section>
+                <util-code-editor
+                  v-model="state.config.cookieConsent.message"
+                  language="markdown"
+                  :aria-label="t(`admin.general.cookieConsentMessage`)" />
+              </w-item-section>
+            </w-item>
+          </template>
         </w-card>
         <!-- ----------------------- -->
         <!-- Uploads -->
@@ -719,6 +815,7 @@ import { computed, onMounted, reactive, watch } from 'vue'
 import { useMeta } from '@/composables/meta'
 import { notify } from '@/composables/notify'
 import { loading } from '@/composables/loading'
+import { apiErrorMessage, apiFailureMessage } from '@/helpers/apiError'
 
 import { useAdminStore } from '@/stores/admin'
 import { useSiteStore } from '@/stores/site'
@@ -741,7 +838,7 @@ const siteStore = useSiteStore()
 
 // I18N
 
-const { t } = useI18n()
+const { t, te } = useI18n()
 
 // META
 
@@ -767,6 +864,14 @@ function defaultConfig() {
       isEnabled: false,
       title: '',
       content: ''
+    },
+    maintenance: {
+      mode: 'off',
+      bypassGroups: []
+    },
+    cookieConsent: {
+      isEnabled: false,
+      message: ''
     },
     pageExtensions: '',
     colorizeBrokenLinks: true,
@@ -817,6 +922,10 @@ const state = reactive({
   //    The previews always render: without one they show the default that is served instead.
   hasLogo: false,
   hasFavicon: false,
+  // -> Whether the site serves any analytics tag, which decides what the consent banner offers
+  hasAnalytics: false,
+  // -> What the maintenance bypass list offers, by id and name
+  groups: [],
   config: defaultConfig()
 })
 
@@ -842,6 +951,11 @@ const ratingsModes = computed(() => [
   { value: 'off', label: t('admin.general.ratingsOff') },
   { value: 'thumbs', label: t('admin.general.ratingsThumbs') },
   { value: 'stars', label: t('admin.general.ratingsStars') }
+])
+const maintenanceModes = computed(() => [
+  { value: 'off', label: t('admin.general.maintenanceModeOff') },
+  { value: 'readonly', label: t('admin.general.maintenanceModeReadOnly') },
+  { value: 'restricted', label: t('admin.general.maintenanceModeRestricted') }
 ])
 const reasonForChangeModes = computed(() => [
   { value: 'off', label: t('admin.general.reasonForChangeOff') },
@@ -880,8 +994,27 @@ async function load() {
   })
   state.hasLogo = resp?.assets?.logo ?? false
   state.hasFavicon = resp?.assets?.favicon ?? false
+  state.hasAnalytics = resp?.hasAnalytics === true
   loading.hide()
   state.loading--
+}
+
+/**
+ * The groups the maintenance bypass list can name. Every group but Guests, which is anonymous access
+ * itself -- letting it through would turn the mode off for the public while it still read as on, and
+ * the server refuses it. `GET /groups` answers `manage:sites`, which is what this screen needs anyway.
+ *
+ * Its ID is fixed at install (`systemIds.guestsGroupId` in base.yml), as `ApiKeyCreateDialog.vue` notes.
+ */
+const GUESTS_GROUP_ID = '10000000-0000-4000-8000-000000000001'
+
+async function loadGroups() {
+  try {
+    const groups = await API_CLIENT.get('groups').json()
+    state.groups = (groups ?? []).filter((g) => g.id !== GUESTS_GROUP_ID)
+  } catch (err) {
+    notify({ type: 'negative', message: apiErrorMessage(err) })
+  }
 }
 
 /**
@@ -909,6 +1042,14 @@ async function save() {
           isEnabled: state.config.banner?.isEnabled ?? false,
           title: state.config.banner?.title ?? '',
           content: state.config.banner?.content ?? ''
+        },
+        maintenance: {
+          mode: state.config.maintenance?.mode ?? 'off',
+          bypassGroups: state.config.maintenance?.bypassGroups ?? []
+        },
+        cookieConsent: {
+          isEnabled: state.config.cookieConsent?.isEnabled ?? false,
+          message: state.config.cookieConsent?.message ?? ''
         },
         pageExtensions: parsePageExtensions(state.config.pageExtensions),
         colorizeBrokenLinks: state.config.colorizeBrokenLinks ?? true,
@@ -951,7 +1092,12 @@ async function save() {
     }).json()
     if (!resp?.ok) {
       throw new Error(
-        t(`admin.general.${resp?.error}`, resp?.message || 'An unexpected error occured.')
+        apiFailureMessage(resp, {
+          t,
+          te,
+          prefix: 'admin.general',
+          fallback: 'An unexpected error occured.'
+        })
       )
     }
     notify({
@@ -1079,6 +1225,7 @@ async function clearFavicon() {
 // MOUNTED
 
 onMounted(() => {
+  loadGroups()
   if (adminStore.currentSiteId) {
     load()
   }

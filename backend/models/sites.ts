@@ -84,6 +84,17 @@ const SITE_ASSET_RENDITIONS: Partial<
 }
 
 /**
+ * What a site's cookie consent banner says until an administrator writes their own.
+ *
+ * True whether or not the site offers a choice about tracking: the wiki itself sets only its session
+ * cookie, which is strictly necessary, and an analytics provider's cookies are set only for a reader
+ * who accepted them (see `analyticsInjections` in `helpers/appShell.ts`). The data migration that
+ * gave existing sites the banner (`cookie-consent`) carries a copy of this text.
+ */
+const DEFAULT_COOKIE_CONSENT_MESSAGE =
+  'This site uses cookies that are strictly necessary for it to work, such as the one keeping you signed in. Any other cookie, such as one measuring how the site is used, is only set with your consent.'
+
+/**
  * Sites model
  */
 class Sites {
@@ -179,6 +190,14 @@ class Sites {
           title: '',
           content: ''
         },
+        maintenance: {
+          mode: 'off',
+          bypassGroups: []
+        },
+        cookieConsent: {
+          isEnabled: false,
+          message: DEFAULT_COOKIE_CONSENT_MESSAGE
+        },
         pageExtensions: ['md', 'html', 'txt'],
         colorizeBrokenLinks: true,
         discoverable: false,
@@ -262,13 +281,16 @@ class Sites {
         //    migrations set them, rather than starting to rewrite menus nobody asked it to touch
         navigation: {
           addPagesToParentMenu: true,
+          addPagesPlacement: 'alphabetical',
           removePagesFromParentMenu: true,
           migrateLinksOnMove: true,
+          migrateLinksPlacement: 'alphabetical',
           updateLabelsOnRename: true,
           createFolderMenus: true,
           deleteOrphanedMenus: true,
           includeStorageOperations: true,
-          showParentLink: true
+          showParentLink: true,
+          showFolderPages: true
         },
         assets: {
           logo: false,
@@ -290,6 +312,7 @@ class Sites {
           contentWidth: 'full',
           sidebarPosition: 'left',
           tocPosition: 'right',
+          invertPositionsForRtl: true,
           showPrintBtn: true,
           showPageProgress: true,
           pageTransitions: true,
@@ -632,6 +655,14 @@ class Sites {
           title: '',
           content: ''
         },
+        maintenance: {
+          mode: 'off',
+          bypassGroups: []
+        },
+        cookieConsent: {
+          isEnabled: false,
+          message: DEFAULT_COOKIE_CONSENT_MESSAGE
+        },
         pageExtensions: ['md', 'html', 'txt'],
         colorizeBrokenLinks: true,
         discoverable: false,
@@ -688,13 +719,16 @@ class Sites {
         //    migrations set them, rather than starting to rewrite menus nobody asked it to touch
         navigation: {
           addPagesToParentMenu: true,
+          addPagesPlacement: 'alphabetical',
           removePagesFromParentMenu: true,
           migrateLinksOnMove: true,
+          migrateLinksPlacement: 'alphabetical',
           updateLabelsOnRename: true,
           createFolderMenus: true,
           deleteOrphanedMenus: true,
           includeStorageOperations: true,
-          showParentLink: true
+          showParentLink: true,
+          showFolderPages: true
         },
         assets: {
           logo: false,
@@ -789,6 +823,7 @@ class Sites {
           contentWidth: 'full',
           sidebarPosition: 'left',
           tocPosition: 'right',
+          invertPositionsForRtl: true,
           showPrintBtn: true,
           showPageProgress: true,
           pageTransitions: true,

@@ -6,7 +6,7 @@ import { pathToFileURL } from 'node:url'
 import { CronExpressionParser } from 'cron-parser'
 import { v4 as uuid } from 'uuid'
 import { createDeferred, type Deferred } from '../helpers/common.ts'
-import { createNotifier } from '../helpers/pubsub.ts'
+import { createChannel } from '../helpers/pubsub.ts'
 import { camelCase } from 'es-toolkit/string'
 import { remove } from 'es-toolkit/array'
 import {
@@ -15,8 +15,10 @@ import {
   jobSchedule as jobScheduleTable,
   jobHistory as jobHistoryTable
 } from '../db/schema.ts'
-import { and, eq, lt, sql } from 'drizzle-orm'
-import type { PoolClient } from 'pg'
+import { and, eq, inArray, lt, sql } from 'drizzle-orm'
+
+/** How many runs of each scheduled task are queued ahead, at minimum. See `addScheduled`. */
+const MIN_QUEUED_RUNS = 6
 
 /** What the scheduler hands an in-process task besides its payload. */
 export interface TaskContext {
@@ -66,12 +68,22 @@ const IN_PROCESS_STOP_GRACE = 60_000
 const abandonedTasks = new Map<string, number>()
 
 /**
- * Sends the scheduler's cross-instance notifications, one at a time.
+ * The scheduler's connection: `newJob` and `jobCompleted`, to and from every instance.
  *
  * Nothing here awaits a notification: a job being added or finishing should not wait on a round trip,
  * and `processJob` runs concurrently with itself, so two notifications easily meet on the one client.
+ *
+ * A `newJob` missed while the connection was being replaced costs nothing, since every instance polls
+ * for work anyway. A missed `jobCompleted` would leave its waiter waiting for good, so those are
+ * settled from the job history instead.
  */
-const notifier = createNotifier(() => WIKI.scheduler.pubsubClient, 'scheduler')
+const channel = createChannel({
+  channel: 'scheduler',
+  role: 'SCHEDULER',
+  label: 'scheduler',
+  onNotification: (payload) => WIKI.scheduler.onNotification(payload),
+  onResubscribe: () => WIKI.scheduler.settleMissedCompletions()
+})
 
 /** A pending `addJob({ promise: true })` caller, waiting on the `jobCompleted` event. */
 interface CompletionPromise {
@@ -100,13 +112,26 @@ export interface AddJobOptions {
 
 export default {
   workerPool: null as FixedThreadPool<any, boolean> | null,
-  pubsubClient: null as PoolClient | null,
   maxWorkers: 1,
   activeWorkers: 0,
   pollingRef: null as NodeJS.Timeout | null,
   scheduledRef: null as NodeJS.Timeout | null,
   tasks: null as Record<string, SimpleTask> | null,
   completionPromises: [] as CompletionPromise[],
+  /**
+   * How far ahead the cron planner queues scheduled jobs, and also how long the `cron` lock may go
+   * unrefreshed before `jobs.isHealthy()` reports the scheduler as down. The two are the same span on
+   * purpose: as long as some instance plans within it, every run is already queued, so a run is
+   * dropped only once the scheduler is reported unhealthy.
+   *
+   * Three check intervals, so two checks in a row can be missed (a restart, a slow transaction)
+   * without losing a run.
+   */
+  cronHorizon(): Temporal.Duration {
+    return Temporal.Duration.from({
+      milliseconds: Math.round(WIKI.config.scheduler.scheduledCheck * 3000)
+    })
+  },
   async init() {
     // -> `availableParallelism` rather than `cpus().length`, which counts every core of the host: in a
     //    container that is the whole node, while this is capped by the cgroup CPU quota (a pod's
@@ -134,52 +159,16 @@ export default {
     this.tasks = {}
     for (const f of await fs.readdir(path.join(WIKI.SERVERPATH, 'tasks/simple'))) {
       const taskName = camelCase(f.replace(/\.[jt]s$/, ''))
-      this.tasks[taskName] = (await import(pathToFileURL(path.join(WIKI.SERVERPATH, 'tasks/simple', f)).href)).task
+      this.tasks[taskName] = (
+        await import(pathToFileURL(path.join(WIKI.SERVERPATH, 'tasks/simple', f)).href)
+      ).task
     }
     return this
   },
   async start(): Promise<void> {
     WIKI.logger.info('Starting Scheduler...')
 
-    const connectionAppName = `Wiki.js - ${WIKI.INSTANCE_ID}:SCHEDULER`
-    this.pubsubClient = await WIKI.dbManager.pool!.connect()
-    await this.pubsubClient!.query(`SET application_name = '${connectionAppName}'`)
-
-    // -> Outbound events handling
-
-    await this.pubsubClient!.query('LISTEN scheduler')
-    this.pubsubClient!.on('notification', async (msg) => {
-      if (msg.channel !== 'scheduler') {
-        return
-      }
-      try {
-        const decoded = JSON.parse(msg.payload!)
-        switch (decoded?.event) {
-          case 'newJob': {
-            // -> No counting here: `processJob` accounts for the jobs it actually claims, and
-            //    counting this call as a worker as well would hide one slot for its duration
-            if (this.activeWorkers < this.maxWorkers) {
-              await this.processJob()
-            }
-            break
-          }
-          case 'jobCompleted': {
-            const jobPromise = this.completionPromises.find((p) => p.id === decoded.id)
-            if (jobPromise) {
-              if (decoded.state === 'success') {
-                jobPromise.resolve()
-              } else {
-                jobPromise.reject(new Error(decoded.errorMessage))
-              }
-              setTimeout(() => {
-                remove(this.completionPromises, (p) => p.id === decoded.id)
-              })
-            }
-            break
-          }
-        }
-      } catch {}
-    })
+    await channel.open()
 
     // -> Start scheduled jobs check
     this.scheduledRef = setInterval(async () => {
@@ -203,6 +192,69 @@ export default {
     }, WIKI.config.scheduler.pollingCheck * 1000)
 
     WIKI.logger.info('Scheduler: [ STARTED ]')
+  },
+  /** Act on a notification from any instance, this one included. */
+  async onNotification(payload: string): Promise<void> {
+    const decoded = JSON.parse(payload)
+    switch (decoded?.event) {
+      case 'newJob': {
+        // -> No counting here: `processJob` accounts for the jobs it actually claims, and counting
+        //    this call as a worker as well would hide one slot for its duration
+        if (this.activeWorkers < this.maxWorkers) {
+          await this.processJob()
+        }
+        break
+      }
+      case 'jobCompleted': {
+        this.settleCompletion(decoded.id, decoded.state === 'success', decoded.errorMessage)
+        break
+      }
+    }
+  },
+  /** Resolve or reject the `addJob({ promise: true })` caller waiting on a job, if there is one. */
+  settleCompletion(id: string, succeeded: boolean, errorMessage?: string): void {
+    const jobPromise = this.completionPromises.find((p) => p.id === id)
+    if (!jobPromise) {
+      return
+    }
+    if (succeeded) {
+      jobPromise.resolve()
+    } else {
+      jobPromise.reject(new Error(errorMessage))
+    }
+    setTimeout(() => {
+      remove(this.completionPromises, (p) => p.id === id)
+    })
+  },
+  /**
+   * Settle the waiters whose job finished while the scheduler's connection was down, and so whose
+   * `jobCompleted` never arrived. The job history has the outcome; a job still running is left to
+   * report the ordinary way.
+   */
+  async settleMissedCompletions(): Promise<void> {
+    if (this.completionPromises.length < 1) {
+      return
+    }
+    const finished = await WIKI.db
+      .select({
+        id: jobHistoryTable.id,
+        state: jobHistoryTable.state,
+        lastErrorMessage: jobHistoryTable.lastErrorMessage
+      })
+      .from(jobHistoryTable)
+      .where(
+        inArray(
+          jobHistoryTable.id,
+          this.completionPromises.map((p) => p.id)
+        )
+      )
+    for (const job of finished) {
+      if (job.state === 'completed') {
+        this.settleCompletion(job.id, true)
+      } else if (job.state === 'failed' || job.state === 'interrupted') {
+        this.settleCompletion(job.id, false, job.lastErrorMessage ?? undefined)
+      }
+    }
   },
   /**
    * Add a job to the scheduler
@@ -238,8 +290,7 @@ export default {
         createdBy: WIKI.INSTANCE_ID
       })
       if (notify) {
-        notifier.send(
-          'scheduler',
+        channel.send(
           JSON.stringify({
             source: WIKI.INSTANCE_ID,
             event: 'newJob',
@@ -460,8 +511,7 @@ export default {
         })
         .where(eq(jobHistoryTable.id, job.id))
       WIKI.logger.info(`Completed job ${job.id}: ${job.task}`)
-      notifier.send(
-        'scheduler',
+      channel.send(
         JSON.stringify({
           source: WIKI.INSTANCE_ID,
           event: 'jobCompleted',
@@ -481,8 +531,7 @@ export default {
             lastErrorMessage: err.message
           })
           .where(eq(jobHistoryTable.id, job.id))
-        notifier.send(
-          'scheduler',
+        channel.send(
           JSON.stringify({
             source: WIKI.INSTANCE_ID,
             event: 'jobCompleted',
@@ -580,17 +629,28 @@ export default {
   async addScheduled(): Promise<void> {
     try {
       await WIKI.db.transaction(async (trx: any) => {
+        const now = Temporal.Now.instant()
+
+        // -> The lock may be taken again slightly before a full interval has passed. Timers fire with
+        //    some jitter, and starting the transaction takes longer on some checks than on others, so
+        //    a check that narrowly misses the cutoff would otherwise wait a full interval.
+        const scheduledCheckMs = Math.round(WIKI.config.scheduler.scheduledCheck * 1000)
+        const relockAfterMs = scheduledCheckMs - Math.min(Math.round(scheduledCheckMs / 10), 30_000)
+        const relockBefore = now
+          .subtract({ milliseconds: relockAfterMs })
+          .toString({ smallestUnit: 'millisecond' })
+
         // -> Acquire lock
         const jobLock = await trx
           .update(jobLockTable)
           .set({
             lastCheckedBy: WIKI.INSTANCE_ID,
-            lastCheckedAt: Temporal.Now.instant().toString({ smallestUnit: 'millisecond' })
+            lastCheckedAt: now.toString({ smallestUnit: 'millisecond' })
           })
           .where(
             eq(
               jobLockTable.key,
-              sql`(SELECT "jobLock"."key" FROM "jobLock" WHERE "jobLock"."key" = 'cron' AND "jobLock"."lastCheckedAt" <= ${Temporal.Now.instant().subtract({ minutes: 5 }).toString({ smallestUnit: 'millisecond' })} FOR UPDATE SKIP LOCKED LIMIT 1)`
+              sql`(SELECT "jobLock"."key" FROM "jobLock" WHERE "jobLock"."key" = 'cron' AND "jobLock"."lastCheckedAt" <= ${relockBefore} FOR UPDATE SKIP LOCKED LIMIT 1)`
             )
           )
 
@@ -603,30 +663,39 @@ export default {
               .select()
               .from(jobsTable)
               .where(eq(jobsTable.isScheduled, true))
+            const horizonEnd = now.add(this.cronHorizon())
             let totalAdded = 0
             for (const job of scheduledJobs) {
               // -> Get next planned iterations
               const plannedIterations = CronExpressionParser.parse(job.cron, {
-                startDate: Temporal.Now.instant().toString({ smallestUnit: 'millisecond' }),
-                // -> 24 hours rather than `{ days: 1 }`: Temporal.Instant only accepts exact time
-                //    units, and in UTC a calendar day is exactly 24 hours anyway.
-                endDate: Temporal.Now.instant()
-                  .add({ hours: 24, minutes: 5 })
-                  .toString({ smallestUnit: 'millisecond' }),
+                startDate: now.toString({ smallestUnit: 'millisecond' }),
+                // -> A day past the horizon, so a task that runs less often than the horizon still
+                //    has its next run queued. 24 hours rather than `{ days: 1 }`: Temporal.Instant
+                //    only accepts exact time units, and in UTC a calendar day is exactly 24 hours.
+                endDate: horizonEnd.add({ hours: 24 }).toString({ smallestUnit: 'millisecond' }),
                 tz: 'UTC'
               })
               /*
-                At most 6 iterations of a task are queued ahead, and `take` is what stops there --
-                and stops early where the window above holds fewer, since it gives back what it
-                reached rather than throwing at the end of it.
+                Every run up to the horizon is queued, so that a frequent task keeps running through
+                missed checks for as long as the scheduler counts as healthy. Every task also gets
+                at least its next MIN_QUEUED_RUNS runs, so an hourly or daily one is queued well
+                ahead of time. The iterator ends quietly at `endDate`, so a task with fewer runs in
+                the window gets only those.
 
-                The cap is a horizon rather than a quota: an iteration already queued still spends
-                one of the six, so what is pending for a task never runs further ahead than its next
-                six runs however often this runs. Counting only the ones added would push that
-                horizon out on every pass, until a minute-by-minute task had the whole window queued.
+                Both limits are measured from now, not counted in new jobs: a run already queued
+                still counts toward them. Counting only the ones added would push the queue further
+                out on every pass, until a minute-by-minute task had the whole window queued.
               */
-              for (const iteration of plannedIterations.take(6)) {
+              let planned = 0
+              for (const iteration of plannedIterations) {
                 const waitUntil = iteration.toDate()
+                if (
+                  planned >= MIN_QUEUED_RUNS &&
+                  waitUntil.getTime() > horizonEnd.epochMilliseconds
+                ) {
+                  break
+                }
+                planned++
                 // -> Ensure this iteration isn't already scheduled
                 if (
                   existingJobs.some(
@@ -667,6 +736,7 @@ export default {
     clearInterval(this.scheduledRef!)
     clearInterval(this.pollingRef!)
     await this.workerPool!.destroy()
+    await channel.close()
     WIKI.logger.info('Scheduler: [ STOPPED ]')
   }
 }

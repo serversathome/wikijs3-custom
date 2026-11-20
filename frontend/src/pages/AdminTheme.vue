@@ -306,6 +306,19 @@
           </w-item>
           <w-separator class="my-2" inset />
           <w-item tag="label">
+            <blueprint-icon icon="translation" />
+            <w-item-section>
+              <w-item-label>{{ t(`admin.theme.invertPositionsForRtl`) }}</w-item-label>
+              <w-item-label caption>{{ t(`admin.theme.invertPositionsForRtlHint`) }}</w-item-label>
+            </w-item-section>
+            <w-item-section avatar>
+              <w-toggle
+                v-model="state.config.invertPositionsForRtl"
+                :aria-label="t(`admin.theme.invertPositionsForRtl`)" />
+            </w-item-section>
+          </w-item>
+          <w-separator class="my-2" inset />
+          <w-item tag="label">
             <blueprint-icon icon="print" />
             <w-item-section>
               <w-item-label>{{ t(`admin.theme.showPrintBtn`) }}</w-item-label>
@@ -378,6 +391,7 @@
 
 <script setup>
 import { useI18n } from 'vue-i18n'
+import { apiFailureMessage } from '@/helpers/apiError'
 import { computed, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
 
 import { useDark } from '@/composables/dark'
@@ -411,7 +425,7 @@ const siteStore = useSiteStore()
 
 // I18N
 
-const { t } = useI18n()
+const { t, te } = useI18n()
 
 // META
 
@@ -440,6 +454,7 @@ function defaultConfig() {
     contentWidth: 'full',
     sidebarPosition: 'left',
     tocPosition: 'right',
+    invertPositionsForRtl: true,
     showPrintBtn: true,
     showPageProgress: true,
     pageTransitions: true,
@@ -865,6 +880,7 @@ async function save() {
       contentWidth: state.config.contentWidth,
       sidebarPosition: state.config.sidebarPosition,
       tocPosition: state.config.tocPosition,
+      invertPositionsForRtl: state.config.invertPositionsForRtl,
       showPrintBtn: state.config.showPrintBtn,
       showPageProgress: state.config.showPageProgress,
       pageTransitions: state.config.pageTransitions,
@@ -882,7 +898,12 @@ async function save() {
     }).json()
     if (!resp?.ok) {
       throw new Error(
-        t(`admin.theme.${resp?.error}`, resp?.message || t('common.error.unexpected'))
+        apiFailureMessage(resp, {
+          t,
+          te,
+          prefix: 'admin.theme',
+          fallback: t('common.error.unexpected')
+        })
       )
     }
     if (adminStore.currentSiteId === siteStore.id) {

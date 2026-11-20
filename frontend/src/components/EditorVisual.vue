@@ -312,7 +312,7 @@
               <w-list dense padding>
                 <template v-for="item of tableActions" :key="item.key">
                   <w-separator v-if="item.divider" class="my-2" />
-                  <w-item v-else clickable @click="item.run">
+                  <w-item v-else-if="!item.hidden" clickable @click="item.run">
                     <w-item-section side><w-icon :name="item.icon" /></w-item-section>
                     <w-item-section>
                       <w-item-label>{{ t(item.label) }}</w-item-label>
@@ -386,7 +386,7 @@
                   <w-list dense padding>
                     <template v-for="item of tableMoreActions" :key="item.key">
                       <w-separator v-if="item.divider" class="my-2" />
-                      <w-item v-else clickable @click="item.run">
+                      <w-item v-else-if="!item.hidden" clickable @click="item.run">
                         <w-item-section side><w-icon :name="item.icon" /></w-item-section>
                         <w-item-section>
                           <w-item-label>{{ t(item.label) }}</w-item-label>
@@ -465,7 +465,14 @@ import { dialog } from '@/composables/dialog'
 import { useImagePropertiesDialog } from '@/composables/imagePropertiesDialog'
 import { notify } from '@/composables/notify'
 import { assetPath } from '@/helpers/assets'
-import { blockMarkdown, blockPropsFilled, isCanvasBlock, writtenProps } from '@/helpers/blocks'
+import {
+  blockMarkdown,
+  blockPropsFilled,
+  initialValues,
+  isCanvasBlock,
+  lockedValues,
+  writtenProps
+} from '@/helpers/blocks'
 import { classValues } from '@/helpers/markdownImages'
 import { renderPermissionsOf, sanitizeRender } from '@/helpers/sanitizeRender'
 
@@ -616,6 +623,7 @@ const disabledBlockTags = new Set()
 let editingBlockPos = null
 
 const underlineEnabled = ref(false)
+const mergeEnabled = ref(false)
 
 // METHODS
 
@@ -692,7 +700,14 @@ const tableActions = [
     key: 'merge',
     icon: 'mdi:table-merge-cells',
     label: 'editor.visual.table.mergeCells',
-    run: () => run(mergeCells)
+    run: () => run(mergeCells),
+    /*
+      Only MultiMarkdown tables can write a merge down (`||`, `^^`), so without `multimdTable` the
+      merge would quietly come apart on save. Splitting stays, for a merge pasted in from elsewhere.
+    */
+    get hidden() {
+      return !mergeEnabled.value
+    }
   },
   {
     key: 'split',
@@ -918,10 +933,7 @@ function insertSiteBlock(definition) {
   if (node?.attrs.name !== definition.block) {
     return
   }
-  const defaults = Object.fromEntries(
-    (definition.props ?? []).map((prop) => [prop.name, prop.default ?? ''])
-  )
-  if (!blockPropsFilled(definition, defaults)) {
+  if (!blockPropsFilled(definition, initialValues(definition))) {
     editBlockParams(node, pos)
   } else if (isCanvasBlock(definition)) {
     editBlockContent(node, pos)
@@ -1469,7 +1481,8 @@ function editBlockContent(node, pos) {
     overlayOpts: {
       editor: definition.contentEditor,
       block: definition,
-      params: { ...node.attrs.blockAttrs },
+      // -> A locked prop is the administrator's value, whatever the page says -- see EditorMarkdown
+      params: { ...node.attrs.blockAttrs, ...lockedValues(definition) },
       source: body.source,
       lang: body.lang,
       // -> The Markdown editor puts a line range here; nothing on this side needs one, since the
@@ -1735,6 +1748,7 @@ onMounted(async () => {
   */
   const config = editorStore.editors.markdown ?? {}
   underlineEnabled.value = Boolean(config.underline)
+  mergeEnabled.value = Boolean(config.multimdTable)
 
   await loadSiteBlocks()
 

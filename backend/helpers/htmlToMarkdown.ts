@@ -7,7 +7,7 @@ import {
   taskListItems
 } from '@joplin/turndown-plugin-gfm'
 
-import type { AnyNode } from 'domhandler'
+import type { AnyNode, Element } from 'domhandler'
 
 /**
  * HTML → markdown: for a page 2.x wrote in an editor 3.x does not have (`models/import.ts`), and for
@@ -65,7 +65,18 @@ export function htmlToMarkdown(html: string, report?: ConversionLosses): string 
       hr: '---',
       codeBlockStyle: 'fenced',
       bulletListMarker: '-',
-      emDelimiter: '*'
+      emDelimiter: '*',
+      /*
+        Turndown hands an element with no text to this and to no rule at all — and a page index has
+        no text by design, so its rule below would never be asked. Everything else blank is what
+        Turndown's own default makes of it.
+      */
+      blankReplacement: (_content, node) =>
+        node.nodeName.toLowerCase() === 'block-index'
+          ? blockIndexMarkdown(node)
+          : (node as unknown as { isBlock: boolean }).isBlock
+            ? '\n\n'
+            : ''
     }).use([highlightedCodeBlock, strikethrough])
     // -> `gfm` is these four in this order, which matters since a later rule wins a node. Spelled out
     //    so that the table rules can be handed a service of their own (`withTableRowSnapshots`).
@@ -100,13 +111,302 @@ export function htmlToMarkdown(html: string, report?: ConversionLosses): string 
 
     const escape = turndown.escape.bind(turndown)
     turndown.escape = (text) => escapeWikiMarkdown(escape(text))
+
+    addWikiRules(turndown)
   }
   const $ = cheerio.load(html, null, false)
   if (report) {
     noteCodeFormatting($, report)
   }
+  liftAlertTitles($)
+  unspanTables($)
   linkBareUrls($)
   return turndown.turndown($.html())
+}
+
+/**
+ * The admonition classes the content stylesheet draws, and the alert marker each one is written as —
+ * the inverse of `KINDS` in the frontend's `renderers/modules/github-alerts.js`, with the label it
+ * draws when the alert has no title of its own.
+ */
+const ALERT_KINDS: Record<string, { marker: string; label: string }> = {
+  'is-info': { marker: 'NOTE', label: 'Note' },
+  'is-success': { marker: 'TIP', label: 'Tip' },
+  'is-important': { marker: 'IMPORTANT', label: 'Important' },
+  'is-warning': { marker: 'WARNING', label: 'Warning' },
+  'is-danger': { marker: 'CAUTION', label: 'Caution' }
+}
+
+/**
+ * The inline blocks (`blocks/CLAUDE.md`), whose element is written back as `:block-name[value]{…}`.
+ * Only these: a container block's body is markdown of its own and has no inline form.
+ */
+const INLINE_BLOCKS = new Set([
+  'block-badge',
+  'block-color',
+  'block-kbd',
+  'block-progress',
+  'block-timestamp',
+  'block-unit'
+])
+
+/** The little of a DOM element the rules below read. The backend has no DOM lib to name it from. */
+interface DomElement {
+  getAttribute(name: string): string | null
+  querySelector(selector: string): { textContent: string | null } | null
+  attributes: ArrayLike<{ name: string; value: string }>
+  textContent: string | null
+}
+
+function elementOf(node: TurndownService.Node): DomElement {
+  return node as unknown as DomElement
+}
+
+function alertKindOf(node: TurndownService.Node): string | null {
+  const classes = (elementOf(node).getAttribute('class') ?? '').split(/\s+/)
+  return classes.find((name) => ALERT_KINDS[name]) ?? null
+}
+
+/** Attributes as the HTML parser Turndown runs on hands them out. */
+function attributesOf(node: TurndownService.Node): Array<{ name: string; value: string }> {
+  return Array.from(elementOf(node).attributes ?? [])
+}
+
+/**
+ * What the wiki's markdown has syntax for and plain HTML spells another way: an alert, a disclosure,
+ * an inline block and an image's size. Each is the inverse of what the renderer draws, so a render
+ * converted back to markdown — an agent reading a page — gets the source an author would have written,
+ * and so does HTML written to look like it (Import from Confluence).
+ */
+function addWikiRules(service: TurndownService): void {
+  /*
+    An admonition, as `> [!NOTE] Title`. The title has been lifted onto the element by
+    `liftAlertTitles`, since by the time this runs the paragraph that held it would already be part of
+    the converted body.
+  */
+  service.addRule('alert', {
+    filter: (node) => node.nodeName === 'BLOCKQUOTE' && alertKindOf(node) !== null,
+    replacement: (content, node) => {
+      const kind = ALERT_KINDS[alertKindOf(node)!]
+      const title = (elementOf(node).getAttribute('data-alert-title') ?? '').trim()
+      const marker = `[!${kind.marker}]${title && title !== kind.label ? ` ${service.escape(title)}` : ''}`
+      const body = content.replace(/^\n+|\n+$/g, '')
+      const lines = [marker, ...(body ? body.split('\n') : [])]
+      return `\n\n${lines.map((line) => (line ? `> ${line}` : '>')).join('\n')}\n\n`
+    }
+  })
+
+  /*
+    A disclosure stays HTML, since markdown has none — but only its two tags do. The body between them
+    is markdown, which the renderer parses as such because an HTML block ends at the blank line after
+    `<summary>`.
+  */
+  service.addRule('details', {
+    filter: 'details',
+    replacement: (content, node) => {
+      const summary = elementOf(node).querySelector('summary')
+      const label = (summary?.textContent ?? '').trim()
+      const escaped = label.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      return `\n\n<details>\n<summary>${escaped}</summary>\n\n${content.trim()}\n\n</details>\n\n`
+    }
+  })
+  service.addRule('summary', { filter: 'summary', replacement: () => '' })
+
+  service.addRule('inlineBlock', {
+    filter: (node) => INLINE_BLOCKS.has(node.nodeName.toLowerCase()),
+    replacement: (_content, node) => {
+      const value = (node.textContent ?? '').replace(/[\\\]]/g, '\\$&')
+      // -> MDC has no escape for a double quote in an attribute, so it becomes a single one, as the
+      //    visual editor writes it
+      const attrs = attributesOf(node)
+        .filter((attr) => attr.value !== '')
+        .map((attr) => `${attr.name}="${attr.value.replaceAll('"', "'")}"`)
+      return `:${node.nodeName.toLowerCase()}[${value}]${attrs.length > 0 ? `{${attrs.join(' ')}}` : ''}`
+    }
+  })
+
+  /*
+    Tabs, as the fences `::block-tabs` is written with: three colons round the set, since its panels
+    are blocks of their own, and two round each panel, whose body is markdown. With the index below,
+    the only blocks written back: the one whose render is all light DOM with nothing drawn in between,
+    and one with no body to lose.
+  */
+  service.addRule('blockTabs', {
+    filter: (node) => node.nodeName.toLowerCase() === 'block-tabs',
+    replacement: (content) => `\n\n:::block-tabs\n${content.trim()}\n:::\n\n`
+  })
+  service.addRule('blockTab', {
+    filter: (node) => node.nodeName.toLowerCase() === 'block-tab',
+    replacement: (content, node) => {
+      const attrs = attributesOf(node)
+        .filter((attr) => attr.value !== '')
+        .map((attr) => `${attr.name}="${attr.value.replaceAll('"', "'")}"`)
+      const suffix = attrs.length > 0 ? `{${attrs.join(' ')}}` : ''
+      return `\n\n::block-tab${suffix}\n${content.trim()}\n::\n\n`
+    }
+  })
+
+  /*
+    A page index, which has no body at all: the block reads everything from its props. Written as
+    the visual editor writes an atom block, with the closing fence on the next line.
+  */
+  service.addRule('blockIndex', {
+    filter: (node) => node.nodeName.toLowerCase() === 'block-index',
+    replacement: (_content, node) => blockIndexMarkdown(node)
+  })
+
+  /*
+    An image, with its width as `markdown-it-imsize` writes one — after the title, as the visual
+    editor's serializer explains. Without this a picture somebody sized to fit the page comes back at
+    its full width.
+  */
+  service.addRule('image', {
+    filter: 'img',
+    replacement: (_content, node) => {
+      const el = elementOf(node)
+      const src = el.getAttribute('src') ?? ''
+      if (!src) {
+        return ''
+      }
+      const alt = service.escape(el.getAttribute('alt') ?? '')
+      const title = el.getAttribute('title')
+      const width = /^\d+$/.test(el.getAttribute('width') ?? '') ? el.getAttribute('width') : ''
+      const height = /^\d+$/.test(el.getAttribute('height') ?? '') ? el.getAttribute('height') : ''
+      const destination = /\s/.test(src) ? `<${src}>` : src.replace(/[()]/g, '\\$&')
+      const titlePart = title ? ` "${title.replace(/"/g, '\\"')}"` : ''
+      const size = width || height ? ` =${width}x${height}` : ''
+      return `![${alt}](${destination}${titlePart}${size})`
+    }
+  })
+
+  /*
+    Sub- and superscript, as `markdown-it-sub` and `markdown-it-sup` write them. Neither reads a space
+    inside unless it is escaped. Without these the tags were dropped and `H<sub>2</sub>O` read `H2O`.
+  */
+  for (const [tag, mark] of [
+    ['sub', '~'],
+    ['sup', '^']
+  ] as const) {
+    service.addRule(tag, {
+      filter: tag,
+      replacement: (content) => {
+        const text = content.trim()
+        return text ? `${mark}${text.replace(/\s+/g, '\\ ')}${mark}` : ''
+      }
+    })
+  }
+
+  /*
+    Footnotes, as `markdown-it-footnote` renders them: a reference is a `<sup class="footnote-ref">`
+    (added after the superscript rule, so it wins the node), and the notes are a list at the end
+    behind a rule of their own, each with a link back. Written back as `[^n]` and `[^n]: …`, a note's
+    later lines indented under it. Import from DokuWiki writes its `((…))` notes in this shape.
+  */
+  service.addRule('footnoteRef', {
+    filter: (node) => node.nodeName === 'SUP' && hasClass(node, 'footnote-ref'),
+    replacement: (_content, node) => {
+      const label = (node.textContent ?? '').replace(/^\[|\]$/g, '').replace(/:\d+$/, '')
+      return label ? `[^${label}]` : ''
+    }
+  })
+  service.addRule('footnoteItem', {
+    filter: (node) => node.nodeName === 'LI' && hasClass(node, 'footnote-item'),
+    replacement: (content, node) => {
+      const label = /^fn(.+)$/.exec(elementOf(node).getAttribute('id') ?? '')?.[1] ?? ''
+      const [first = '', ...rest] = content.trim().split('\n')
+      const body = [first, ...rest.map((line) => (line ? `    ${line}` : ''))].join('\n')
+      return `\n\n[^${label}]: ${body}\n\n`
+    }
+  })
+  service.addRule('footnoteChrome', {
+    filter: (node) =>
+      (node.nodeName === 'HR' && hasClass(node, 'footnotes-sep')) ||
+      (node.nodeName === 'A' && hasClass(node, 'footnote-backref')),
+    replacement: () => ''
+  })
+}
+
+function hasClass(node: TurndownService.Node, name: string): boolean {
+  return (elementOf(node).getAttribute('class') ?? '').split(/\s+/).includes(name)
+}
+
+/** A page index as markdown: the block's fences, with its props and no body. */
+function blockIndexMarkdown(node: TurndownService.Node): string {
+  const attrs = attributesOf(node)
+    .filter((attr) => attr.value !== '')
+    .map((attr) => `${attr.name}="${attr.value.replaceAll('"', "'")}"`)
+  return `\n\n::block-index${attrs.length > 0 ? `{${attrs.join(' ')}}` : ''}\n::\n\n`
+}
+
+/**
+ * Move an alert's title paragraph onto the alert itself, where the `alert` rule reads it. The
+ * renderer writes the title as the first paragraph of the quote, classed `alert-title`.
+ */
+function liftAlertTitles($: cheerio.CheerioAPI): void {
+  $('blockquote > p.alert-title:first-child').each((_, element) => {
+    const title = $(element)
+    title.parent().attr('data-alert-title', title.text())
+    title.remove()
+  })
+}
+
+/**
+ * Write every merged cell out as the cells it covered, the first holding its content and the rest
+ * empty.
+ *
+ * A markdown table has no spans, and the table rule writes each `<td>` it finds as one cell — so a
+ * cell spanning two columns left its row a cell short, and one spanning two rows left every row
+ * below it a cell short at that point, which shifts the rest of the row into the wrong columns. Laid
+ * out on the grid first, each row has every column and its text stays under its heading; only the
+ * merging is lost.
+ */
+function unspanTables($: cheerio.CheerioAPI): void {
+  $('table').each((_, table) => {
+    const own = (el: AnyNode) => $(el).closest('table')[0] === table
+    if (
+      $(table)
+        .find('[colspan], [rowspan]')
+        .filter((_, el) => own(el)).length < 1
+    ) {
+      return
+    }
+    const pending: Array<{ left: number; tag: string } | undefined> = []
+    $(table)
+      .find('tr')
+      .filter((_, tr) => own(tr))
+      .each((_, tr) => {
+        const cells = $(tr).children('th, td').toArray()
+        const out: Array<AnyNode | string> = []
+        let column = 0
+        const fill = () => {
+          for (let held = pending[column]; held && held.left > 0; held = pending[column]) {
+            out.push(`<${held.tag}></${held.tag}>`)
+            held.left--
+            column++
+          }
+        }
+        for (const cell of cells) {
+          fill()
+          const tag = (cell as Element).name
+          const colspan = Math.max(1, Number.parseInt($(cell).attr('colspan') ?? '1', 10) || 1)
+          const rowspan = Math.max(1, Number.parseInt($(cell).attr('rowspan') ?? '1', 10) || 1)
+          $(cell).removeAttr('colspan').removeAttr('rowspan')
+          out.push(cell)
+          for (let n = 1; n < colspan; n++) {
+            out.push(`<${tag}></${tag}>`)
+          }
+          for (let n = 0; n < colspan; n++) {
+            pending[column + n] = rowspan > 1 ? { left: rowspan - 1, tag } : undefined
+          }
+          column += colspan
+        }
+        fill()
+        $(tr).empty()
+        for (const piece of out) {
+          $(tr).append(piece as any)
+        }
+      })
+  })
 }
 
 /** The plugin's rules that read a table's `rows`, by the key it adds them under. */

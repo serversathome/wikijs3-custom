@@ -165,7 +165,14 @@ ever being listed by it. The models refuse it wherever something is put somewher
   which would bring its contents in at once. Creating that folder empty is allowed, since that is
   how `blogs.ensureFolder` gives a board one.
 - **`feedback.guardBoardFolder`**, for a board created, moved or restored over a folder that
-  already holds a sub-folder, a file or a bodyless page — the one check that has to query.
+  already holds anything — ordinary pages included — or where the recycle bin holds a page deleted
+  from at or under the board's path. The one check that has to query. A board replaces the rule
+  reference of everything under it, so arriving over pages that are already there would void every
+  rule written for them, for every account, on nothing more than the right to write at the board's
+  own path. Ideas therefore arrive after their board, and an existing page is brought in by moving
+  it, which asks `manage:pages` at the page itself. An actor holding `manage:system` is above every
+  rule and may still bring a board over ordinary pages (a sub-folder, a file or a bodyless page
+  remains refused) — which is how a board deleted with its ideas left behind is restored.
 
 Anything placed under a board before this rule existed is left where it is: it is still under the
 board's access and still not listed, and moving or deleting it is allowed.
@@ -572,6 +579,10 @@ card layout as there is for a blog, because a board is scanned rather than brows
   board's `voting` is off or the idea's `allowRatings` is off, and the count is still shown.
 - Search is debounced and written into the URL, so a search result can be linked to, as a blog's
   tag filter can.
+- The sort, statuses and category the reader picks are also remembered per board for the browser
+  session (`sessionStorage`), and put back into a board URL that arrives with no selection at all, so
+  that coming back from an idea through a link does not reset the board to its defaults. A URL that
+  carries any selection is shown as it is, and the search is never remembered.
 - **The sidebar** carries two lists. Status lists all six, each with its count, as checkboxes. Until
   the reader touches them they show the default for the current sort, so changing the sort changes
   them too. Once the reader has picked statuses, `status` is in the URL and changing the sort leaves
@@ -822,7 +833,9 @@ voted on changed status".
 - **Rules under a board are silently ignored.** An administrator who writes a DENY for
   `/feedback/some-idea` gets nothing from it, by design. The group editor's warning
   ([§9](#9-everything-else-an-idea-touches)) is what keeps that from being a surprise, and it has to
-  be there from the first release.
+  be there from the first release. The reverse order — a board arriving over pages that rules
+  were already written for — is refused instead (`guardBoardFolder`, above), since whoever writes
+  those rules is not part of the act that would void them.
 - **The board map is a cache, and access depends on it.** Between a board being created, moved or
   deleted and another instance hearing `reloadFeedbackBoards`, that instance resolves the pages
   under it by their own paths. The window is the same one a site's configuration already has after

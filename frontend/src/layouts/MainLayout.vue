@@ -5,8 +5,9 @@
     </w-header>
     <!--
       In the interface's language and direction. Which edge of the window the drawer sits on is the
-      theme's `sidebarPosition` and is placed in physical terms, so it does not move with them -- what
-      runs the other way on a right-to-left interface is what is inside it.
+      theme's `sidebarPosition` and is placed in physical terms, so `dir` does not move it -- what runs
+      the other way on a right-to-left interface is what is inside it. The theme can still swap the
+      side for a right-to-left interface (`invertPositionsForRtl`), which `sidebarSide` answers.
     -->
     <w-drawer
       class="bg-sidebar"
@@ -15,7 +16,7 @@
       v-model="isSidebarOpen"
       :width="sidebarWidth"
       :overlay-below="SIDEBAR_OVERLAY_BELOW"
-      :side="siteStore.theme.sidebarPosition === `right` ? `right` : `left`">
+      :side="sidebarSide === `right` ? `right` : `left`">
       <div v-if="isSidebarMini" class="sidebar-mini flex flex-col items-stretch">
         <w-btn
           v-if="siteStore.locales.showMenu"
@@ -325,6 +326,9 @@ const SIDEBAR_WIDTH_MINI = 56
 
 const sidebarWidth = computed(() => (isSidebarMini.value ? SIDEBAR_WIDTH_MINI : SIDEBAR_WIDTH))
 
+/** The edge of the window the sidebar is on, for the interface's locale -- see `siteStore.sidebarSide`. */
+const sidebarSide = computed(() => siteStore.sidebarSide(commonStore.locale))
+
 /*
   The scroll-to-top button ENDS where the sidebar's column does, tucked into the bottom of it: the
   sidebar's own width on the left, or the window's right edge when the site puts its sidebar there,
@@ -340,7 +344,7 @@ const scrollerAnchorX = computed(() => {
   if (!isWideViewport.value || !isSidebarAvailable.value) {
     return null
   }
-  return siteStore.theme.sidebarPosition === 'right' ? '100%' : `${sidebarWidth.value}px`
+  return sidebarSide.value === 'right' ? '100%' : `${sidebarWidth.value}px`
 })
 
 // -> The "Allow Browsing" site feature (admin/general): with it off the tree browser is not something
@@ -407,15 +411,21 @@ function openSidebar() {
   this bar's border plus `.sidebar-nav`'s top border: a border stays a whole CSS pixel on a scaled
   display, which put it at twice the weight of the separator between the buttons. The light half has
   to be drawn from this side because the nav below is its own scroll container, and anything it
-  drew would scroll away with the list. 39px and the 2px of padding are the old 38px bar plus the
-  nav's 1px border, so neither the buttons nor the list move. The pair is thinned towards the TOP of
-  that padding, so on a scaled display the separator still runs down into it without a gap.
+  drew would scroll away with the list. 39px is the old 38px bar plus the nav's 1px border, so the
+  list does not move.
+
+  The padding is exactly the pair's height -- two DEVICE pixels -- rather than a fixed 2px. At 2px the
+  pair, thinned towards the top, left the rest of the padding showing the bar's own colour beneath it
+  on a scaled display: a fractional strip that read as a heavier light line wherever what follows is
+  darker than the bar (the nav's "In this folder" band). Sized to the pair, the light hairline is the
+  last thing the bar paints, and the buttons, and the separator running down to the pair, take up the
+  fraction of a pixel instead.
 */
 .sidebar-actions {
   position: relative;
   background: linear-gradient(to bottom, rgba(255, 255, 255, 0.1) 0%, rgba(0, 0, 0, 0.05) 100%);
   height: 39px;
-  padding-bottom: 2px;
+  padding-bottom: calc(2px / var(--w-dpr, 1));
 
   &::after {
     content: '';
