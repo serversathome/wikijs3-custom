@@ -194,15 +194,13 @@
                       <w-btn-toggle
                         v-if="cfg.enum && cfg.enumDisplay === `buttons`"
                         v-model="cfg.value"
-                        push
-                        glossy
+                        depth
                         no-caps
                         toggle-color="primary"
                         :options="cfg.enum"
                         :disable="cfg.readOnly" />
                       <w-select
                         v-else-if="cfg.enum"
-                        outlined
                         v-model="cfg.value"
                         :options="cfg.enum"
                         emit-value
@@ -218,7 +216,6 @@
                            operator's own. -->
                       <w-input
                         v-else
-                        outlined
                         v-model="cfg.value"
                         dense
                         no-autofill
@@ -284,7 +281,6 @@
                   </w-item-section>
                   <w-item-section side style="min-width: 280px">
                     <w-input
-                      outlined
                       dense
                       no-autofill
                       v-model="state.target.assetDelivery.baseUrl"
@@ -303,7 +299,6 @@
                   </w-item-section>
                   <w-item-section side style="min-width: 150px">
                     <w-input
-                      outlined
                       dense
                       no-autofill
                       v-model="state.target.assetDelivery.linkExpiration"
@@ -494,7 +489,6 @@
             </w-item-section>
             <w-item-section side style="min-width: 240px">
               <w-select
-                outlined
                 dense
                 options-dense
                 emit-value
@@ -521,7 +515,6 @@
               </w-item-section>
               <w-item-section side style="min-width: 240px">
                 <w-select
-                  outlined
                   dense
                   options-dense
                   emit-value
@@ -560,7 +553,6 @@
             </w-item-section>
             <w-item-section side style="min-width: 150px">
               <w-input
-                outlined
                 dense
                 no-autofill
                 v-model="state.largeThreshold"
@@ -576,7 +568,6 @@
             </w-item-section>
             <w-item-section side style="min-width: 150px">
               <w-input
-                outlined
                 dense
                 no-autofill
                 v-model="state.syncInterval"
@@ -642,7 +633,6 @@
             </w-item-section>
             <w-item-section side style="min-width: 240px">
               <w-select
-                outlined
                 dense
                 options-dense
                 emit-value

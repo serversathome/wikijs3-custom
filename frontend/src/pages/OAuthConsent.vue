@@ -67,8 +67,7 @@
               <w-item-section side>
                 <w-btn-toggle
                   v-model="state.scopes[cat.key]"
-                  push
-                  glossy
+                  depth
                   no-caps
                   dense
                   toggle-color="primary"
@@ -80,7 +79,6 @@
           <w-card-section class="pt-0">
             <w-select
               v-model="state.expiration"
-              outlined
               dense
               :options="expirations"
               map-options

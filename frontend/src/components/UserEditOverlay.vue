@@ -93,7 +93,6 @@
                   </w-item-section>
                   <w-item-section>
                     <w-input
-                      outlined
                       v-model="state.user.name"
                       :disable="!canManage"
                       dense
@@ -113,7 +112,6 @@
                   </w-item-section>
                   <w-item-section>
                     <w-input
-                      outlined
                       v-model="state.user.email"
                       :disable="!canManage"
                       dense
@@ -129,7 +127,6 @@
                   </w-item-section>
                   <w-item-section>
                     <w-input
-                      outlined
                       v-model="state.user.handle"
                       :disable="!canManage"
                       dense
@@ -150,7 +147,6 @@
                     </w-item-section>
                     <w-item-section>
                       <w-input
-                        outlined
                         v-model="state.user.meta.location"
                         :disable="!canManage"
                         dense
@@ -166,7 +162,6 @@
                     </w-item-section>
                     <w-item-section>
                       <w-input
-                        outlined
                         v-model="state.user.meta.jobTitle"
                         :disable="!canManage"
                         dense
@@ -182,7 +177,6 @@
                     </w-item-section>
                     <w-item-section>
                       <w-input
-                        outlined
                         v-model="state.user.meta.pronouns"
                         :disable="!canManage"
                         dense
@@ -194,26 +188,6 @@
               <w-card class="shadow-1 pb-2 mt-4" v-if="state.user.meta">
                 <w-card-header>{{ t('admin.users.preferences') }}</w-card-header>
                 <w-item>
-                  <blueprint-icon icon="translation" />
-                  <w-item-section>
-                    <w-item-label>{{ t(`admin.users.language`) }}</w-item-label>
-                    <w-item-label caption>{{ t(`admin.users.languageHint`) }}</w-item-label>
-                  </w-item-section>
-                  <w-item-section>
-                    <w-select
-                      outlined
-                      v-model="state.user.prefs.locale"
-                      :disable="!canManage"
-                      :options="languages"
-                      emit-value
-                      map-options
-                      dense
-                      options-dense
-                      :aria-label="t(`admin.users.language`)" />
-                  </w-item-section>
-                </w-item>
-                <w-separator class="my-2" inset />
-                <w-item>
                   <blueprint-icon icon="timezone" />
                   <w-item-section>
                     <w-item-label>{{ t(`admin.users.timezone`) }}</w-item-label>
@@ -221,7 +195,6 @@
                   </w-item-section>
                   <w-item-section>
                     <w-select
-                      outlined
                       v-model="state.user.prefs.timezone"
                       :disable="!canManage"
                       :options="timezones"
@@ -243,7 +216,6 @@
                   </w-item-section>
                   <w-item-section>
                     <w-select
-                      outlined
                       v-model="state.user.prefs.dateFormat"
                       :disable="!canManage"
                       emit-value
@@ -271,8 +243,7 @@
                     <w-btn-toggle
                       v-model="state.user.prefs.timeFormat"
                       :disable="!canManage"
-                      push
-                      glossy
+                      depth
                       no-caps
                       toggle-color="primary"
                       :options="[
@@ -292,8 +263,7 @@
                     <w-btn-toggle
                       v-model="state.user.prefs.appearance"
                       :disable="!canManage"
-                      push
-                      glossy
+                      depth
                       no-caps
                       toggle-color="primary"
                       :options="[
@@ -301,6 +271,44 @@
                         { label: t('profile.appearanceLight'), value: 'light' },
                         { label: t('profile.appearanceDark'), value: 'dark' }
                       ]" />
+                  </w-item-section>
+                </w-item>
+                <w-separator class="my-2" inset />
+                <w-item>
+                  <blueprint-icon icon="translation" />
+                  <w-item-section>
+                    <w-item-label>{{ t(`admin.users.language`) }}</w-item-label>
+                    <w-item-label caption>{{ t(`admin.users.languageHint`) }}</w-item-label>
+                  </w-item-section>
+                  <w-item-section>
+                    <w-select
+                      v-model="state.user.prefs.locale"
+                      :disable="!canManage"
+                      :options="languages"
+                      emit-value
+                      map-options
+                      dense
+                      options-dense
+                      :aria-label="t(`admin.users.language`)" />
+                  </w-item-section>
+                </w-item>
+              </w-card>
+              <!-- -> The same `prefs` as the card above, split off as the Profile page splits them -->
+              <w-card class="shadow-1 pb-2 mt-4" v-if="state.user.meta">
+                <w-card-header>{{ t('profile.accessibility') }}</w-card-header>
+                <w-item tag="label">
+                  <blueprint-icon icon="navigation-toolbar-top" />
+                  <w-item-section>
+                    <w-item-label>{{ t(`profile.collapseHeaderOnScroll`) }}</w-item-label>
+                    <w-item-label caption>{{
+                      t(`profile.collapseHeaderOnScrollHint`)
+                    }}</w-item-label>
+                  </w-item-section>
+                  <w-item-section avatar>
+                    <w-toggle
+                      v-model="state.user.prefs.collapseHeaderOnScroll"
+                      :disable="!canManage"
+                      :aria-label="t(`profile.collapseHeaderOnScroll`)" />
                   </w-item-section>
                 </w-item>
                 <w-separator class="my-2" inset />
@@ -314,8 +322,7 @@
                     <w-btn-toggle
                       v-model="state.user.prefs.cvd"
                       :disable="!canManage"
-                      push
-                      glossy
+                      depth
                       no-caps
                       toggle-color="primary"
                       :options="[
@@ -323,6 +330,27 @@
                         { value: 'protanopia', label: t('profile.cvdProtanopia') },
                         { value: 'deuteranopia', label: t('profile.cvdDeuteranopia') },
                         { value: 'tritanopia', label: t('profile.cvdTritanopia') }
+                      ]" />
+                  </w-item-section>
+                </w-item>
+                <w-separator class="my-2" inset />
+                <w-item>
+                  <blueprint-icon icon="typography" />
+                  <w-item-section>
+                    <w-item-label>{{ t(`profile.contentTextSize`) }}</w-item-label>
+                    <w-item-label caption>{{ t(`profile.contentTextSizeHint`) }}</w-item-label>
+                  </w-item-section>
+                  <w-item-section class="flex-none">
+                    <w-btn-toggle
+                      v-model="state.user.prefs.contentTextSize"
+                      :disable="!canManage"
+                      depth
+                      no-caps
+                      toggle-color="primary"
+                      :options="[
+                        { value: 'default', label: t('profile.contentTextSizeDefault') },
+                        { value: 'large', label: t('profile.contentTextSizeLarge') },
+                        { value: 'larger', label: t('profile.contentTextSizeLarger') }
                       ]" />
                   </w-item-section>
                 </w-item>
@@ -352,28 +380,6 @@
                       v-model="state.user.prefs.underlineLinks"
                       :disable="!canManage"
                       :aria-label="t(`profile.underlineLinks`)" />
-                  </w-item-section>
-                </w-item>
-                <w-separator class="my-2" inset />
-                <w-item>
-                  <blueprint-icon icon="typography" />
-                  <w-item-section>
-                    <w-item-label>{{ t(`profile.contentTextSize`) }}</w-item-label>
-                    <w-item-label caption>{{ t(`profile.contentTextSizeHint`) }}</w-item-label>
-                  </w-item-section>
-                  <w-item-section class="flex-none">
-                    <w-btn-toggle
-                      v-model="state.user.prefs.contentTextSize"
-                      :disable="!canManage"
-                      push
-                      glossy
-                      no-caps
-                      toggle-color="primary"
-                      :options="[
-                        { value: 'default', label: t('profile.contentTextSizeDefault') },
-                        { value: 'large', label: t('profile.contentTextSizeLarge') },
-                        { value: 'larger', label: t('profile.contentTextSizeLarger') }
-                      ]" />
                   </w-item-section>
                 </w-item>
               </w-card>
@@ -425,7 +431,6 @@
                 <w-card-header>{{ t('admin.users.notes') }}</w-card-header>
                 <w-card-section class="pt-0">
                   <w-input
-                    outlined
                     v-model="state.user.meta.notes"
                     :disable="!canManage"
                     type="textarea"
@@ -644,7 +649,6 @@
                   <blueprint-icon icon="join" />
                   <w-item-section>
                     <w-select
-                      outlined
                       :options="assignableGroups"
                       v-model="state.groupToAdd"
                       map-options

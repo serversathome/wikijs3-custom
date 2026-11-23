@@ -12,7 +12,6 @@
             <w-input
               ref="iptName"
               v-model="state.name"
-              outlined
               dense
               :rules="nameValidation"
               hide-bottom-space
@@ -26,7 +25,6 @@
           <w-item-section>
             <w-select
               v-model="state.expiration"
-              outlined
               :options="expirations"
               map-options
               option-value="value"
@@ -56,8 +54,7 @@
           <w-item-section side>
             <w-btn-toggle
               v-model="state.scopes[cat.key]"
-              push
-              glossy
+              depth
               no-caps
               toggle-color="primary"
               :aria-label="t(`profile.tokensScope.${cat.key}`)"
@@ -84,8 +81,7 @@
             <w-btn-toggle
               v-model="state.scopes.mcp"
               class="ml-3"
-              push
-              glossy
+              depth
               no-caps
               toggle-color="secondary"
               :disable="!props.mcp.mayUse"
