@@ -77,14 +77,12 @@
             ref="iptTitle"
             v-model="pageStore.title"
             :label="t(`editor.props.title`)"
-            outlined
             dense />
           <w-input
             v-model="pageStore.description"
             :label="t(`editor.props.shortDescription`)"
-            outlined
             dense />
-          <w-input v-model="pageStore.icon" :label="t(`editor.props.icon`)" outlined dense>
+          <w-input v-model="pageStore.icon" :label="t(`editor.props.icon`)" dense>
             <template #prepend>
               <w-icon
                 :class="pageIconColorClass(pageStore.iconColor)"
@@ -97,19 +95,13 @@
                 set through `v-html`, which renders no slot -- so the menu inside it never existed and
                 the control did nothing. It was also just the 14px glyph, with no hit area of its own.
               -->
-              <w-btn
-                flat
-                dense
-                round
-                icon="la:icons"
-                color="primary"
-                :aria-label="t(`iconPicker.open`)">
+              <w-field-cap icon="la:icons" :aria-label="t(`iconPicker.open`)">
                 <w-tooltip>{{ t('iconPicker.open') }}</w-tooltip>
                 <!-- The properties panel is docked to the right edge, so the picker has to grow leftwards -->
                 <w-menu content-class="shadow-7" anchor="bottom right" self="top right">
                   <icon-picker-dialog v-model="pageStore.icon" />
                 </w-menu>
-              </w-btn>
+              </w-field-cap>
             </template>
           </w-input>
           <!--
@@ -125,7 +117,6 @@
             :hint="isColorableIcon ? null : t(`editor.props.iconColorImageHint`)"
             emit-value
             map-options
-            outlined
             dense>
             <template #prepend>
               <span class="size-4 shrink-0 rounded-full" :class="selectedIconColorSwatch" />
@@ -141,7 +132,6 @@
             v-if="pageStore.path !== `home`"
             v-model="pageStore.alias"
             :label="t(`editor.props.alias`)"
-            outlined
             dense
             prefix="/a/" />
         </w-form>
@@ -203,8 +193,7 @@
           <div>
             <w-btn-toggle
               :model-value="ownership.mode"
-              push
-              glossy
+              depth
               no-caps
               toggle-color="primary"
               :options="ownershipModes"
@@ -233,7 +222,6 @@
               use-input
               use-chips
               remote-filter
-              outlined
               dense
               @filter="lookupUsers"
               @update:model-value="updateOwnership({ users: $event })">
@@ -269,7 +257,6 @@
               use-input
               use-chips
               remote-filter
-              outlined
               dense
               @filter="lookupGroups"
               @update:model-value="updateOwnership({ groups: $event })" />
@@ -285,8 +272,7 @@
           <div>
             <w-btn-toggle
               v-model="pageStore.publishState"
-              push
-              glossy
+              depth
               no-caps
               toggle-color="primary"
               :options="[
@@ -555,6 +541,21 @@
               checked-icon="la:check"
               unchecked-icon="la:times" />
           </div>
+          <!--
+            Saved with the page like the two above, but only `manage:pages` here changes it -- the
+            server keeps the stored value for anybody else -- so everybody else sees it read-only.
+          -->
+          <div>
+            <w-toggle
+              :model-value="pageStore.isTemplate"
+              @update:model-value="setTemplate"
+              dense
+              :disable="!mayManagePage"
+              :label="$t(`editor.props.isTemplate`)"
+              color="primary"
+              checked-icon="la:check"
+              unchecked-icon="la:times" />
+          </div>
           <div>
             <w-toggle
               v-model="state.requirePassword"
@@ -576,7 +577,6 @@
               autocomplete="off"
               :label="t(`editor.props.password`)"
               :hint="t(`editor.props.passwordHint`)"
-              outlined
               dense />
           </div>
         </w-form>
@@ -1014,6 +1014,23 @@ function jumpToSection(id) {
     behavior: scrollBehavior()
   })
 }
+/**
+ * Mark the page as a template, or not.
+ *
+ * Marking one also takes it out of the site navigation and search, since a template is scaffolding
+ * for other pages rather than one to land on. Only as a starting point: both toggles stay where they
+ * are for the author to turn back on, and nothing is enforced -- a wiki that wants its templates
+ * browsable can have that. Unmarking one leaves them alone, since there is no telling what the author
+ * wants the page to be next.
+ */
+function setTemplate(value) {
+  pageStore.isTemplate = value
+  if (value) {
+    pageStore.isBrowsable = false
+    pageStore.isSearchable = false
+  }
+}
+
 function toggleRequirePassword(newValue) {
   if (newValue) {
     nextTick(() => {

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 
 import { pick } from 'es-toolkit/object'
+import { validate as uuidValidate } from 'uuid'
 
 import { useSiteStore } from './site'
 import { useEditorStore } from './editor'
@@ -34,6 +35,8 @@ const DUPLICATED_PAGE_PROPS = [
   'iconColor',
   'isBrowsable',
   'isSearchable',
+  // -> A copy of a template is a template, where its author may mark one; see `isTemplate` below
+  'isTemplate',
   'password',
   'publishEndDate',
   'publishStartDate',
@@ -48,6 +51,35 @@ const DUPLICATED_PAGE_PROPS = [
   'showToc',
   'tags',
   'tocDepth'
+]
+
+/**
+ * The page properties a page started from a template takes from it, as `pageFromTemplate` reads them.
+ *
+ * Not `DUPLICATED_PAGE_PROPS`, for two reasons. A template is named by a link, and the link's author
+ * is not the person saving the page: carrying the template's scripts, CSS or password would hand
+ * them to whoever opens the link, out of sight in the properties panel, and a saver holding
+ * `write:scripts` would store a script written by somebody who may not. And how a template is kept
+ * out of the way -- a draft, not browsable, not searchable -- says something about the template and
+ * nothing about the pages made from it, which start published and visible like any new page. Nor
+ * `relations`, which point the new page at somewhere the author did not pick either.
+ *
+ * What is left is what an author can see on the page they are about to save: its text, icon, tags
+ * and display options.
+ */
+const TEMPLATE_PAGE_PROPS = [
+  'allowBacklinks',
+  'allowComments',
+  'allowContributions',
+  'allowGlossaryLinks',
+  'allowRatings',
+  'icon',
+  'iconColor',
+  'showLastEditedBy',
+  'showSidebar',
+  'showTags',
+  'showToc',
+  'tags'
 ]
 
 /**
@@ -69,6 +101,7 @@ export const SAVED_PAGE_FIELDS = [
   'iconColor',
   'isBrowsable',
   'isSearchable',
+  'isTemplate',
   'localeRelations',
   'password',
   'publishEndDate',
@@ -199,6 +232,13 @@ export const usePageStore = defineStore('page', {
      */
     isEditLocked: false,
     isSearchable: true,
+    /**
+     * Whether the page is offered as a template: listed by the From Template dialog, and what a
+     * `/_create?template=` link may start a page from. Saved with the page like the toggles beside it,
+     * but only an author holding `manage:pages` on it can change it -- the server keeps the stored
+     * value for anybody else, and the properties panel shows it read-only to them.
+     */
+    isTemplate: false,
     locale: 'en',
     navigationId: null,
     navigationMode: 'inherit',
@@ -758,7 +798,9 @@ export const usePageStore = defineStore('page', {
         isActive: true,
         mode: 'create',
         editor,
-        pathChosen: Boolean(path)
+        pathChosen: Boolean(path),
+        // -> A new page is a new edit, even when it is started from inside an open editor
+        lastInsertFolder: null
       })
 
       /*
@@ -866,6 +908,7 @@ export const usePageStore = defineStore('page', {
         */
         isBrowsable: props.isBrowsable ?? editor !== 'redirect',
         isSearchable: props.isSearchable ?? editor !== 'redirect',
+        isTemplate: props.isTemplate ?? false,
         /*
           A page being created is not a post of anything yet: it has not been saved, so no blog has it
           under its path. Cleared rather than left at whatever the page this one was started from
@@ -959,6 +1002,119 @@ export const usePageStore = defineStore('page', {
         })
       } catch (err) {
         console.warn(err)
+        throw err
+      }
+    },
+    /**
+     * PAGE - CREATE FROM TEMPLATE
+     *
+     * A new page whose text and visible properties come from a template, so that every page of a kind
+     * starts from the same structure. What the From Template dialog opens, and what a
+     * `/_create?template=` link does -- from an issue tracker, say. Not a duplicate: see
+     * `TEMPLATE_PAGE_PROPS` for what is carried and why less is carried than a copy takes.
+     *
+     * The template is read with the reader's own permissions, through the same request a page view
+     * makes, so a link can never put in front of somebody a source they could not have opened
+     * themselves. Nothing is written: as with a duplicate, the editor opens on an unsaved page.
+     *
+     * @param template The template's id, or its path in `locale`. Anything shaped like a UUID is
+     *   taken as an id -- a page whose path is one UUID-shaped segment is reached by its id instead.
+     * @param editor The editor the link named, if it named one. It has to be the template's: a
+     *   markdown template cannot open in another editor, and picking one of the two silently would
+     *   leave the link's author not knowing which they got.
+     * @param basePath, fromNavigate As for `pageCreate`: the folder a menu was opened on, and whether
+     *   the route is already `/_create`.
+     * @throws `ERR_TEMPLATE_NOT_FOUND`, `ERR_TEMPLATE_NOT_TEMPLATE`, `ERR_TEMPLATE_LOCKED`,
+     *   `ERR_TEMPLATE_NO_SOURCE`, or `ERR_TEMPLATE_EDITOR_MISMATCH` with `templateEditor` set on the
+     *   error.
+     */
+    async pageFromTemplate({
+      template,
+      editor,
+      path,
+      basePath,
+      locale,
+      title,
+      fromNavigate = false
+    }) {
+      const siteStore = useSiteStore()
+      const isId = uuidValidate(template)
+      let pageData
+      try {
+        pageData = await API_CLIENT.get(
+          `sites/${siteStore.id}/pages/${isId ? template : pagePathHash(template)}`,
+          {
+            searchParams: {
+              withContent: true,
+              // -> A path is only a page within a locale; an id is a page wherever it is
+              ...(!isId && locale && { locale })
+            }
+          }
+        ).json()
+      } catch (err) {
+        if (err.response?.status === 404) {
+          throw new Error('ERR_TEMPLATE_NOT_FOUND')
+        }
+        throw err
+      }
+      if (!pageData?.id) {
+        throw new Error('ERR_TEMPLATE_NOT_FOUND')
+      }
+      /*
+        Only a page somebody holding `manage:pages` on it marked as one. A link names its template, and
+        the person following it did not choose it: what it may name is held to the pages that were put
+        forward for exactly this.
+      */
+      if (!pageData.isTemplate) {
+        throw new Error('ERR_TEMPLATE_NOT_TEMPLATE')
+      }
+      // -> Both answer without the body, which is the one thing a template is for
+      if (pageData.isLocked) {
+        throw new Error('ERR_TEMPLATE_LOCKED')
+      }
+      if (!Object.hasOwn(pageData, 'content')) {
+        throw new Error('ERR_TEMPLATE_NO_SOURCE')
+      }
+      if (editor && editor !== pageData.editor) {
+        const err = new Error('ERR_TEMPLATE_EDITOR_MISMATCH')
+        err.templateEditor = pageData.editor
+        throw err
+      }
+      await this.pageCreate({
+        editor: pageData.editor,
+        path,
+        basePath,
+        locale,
+        title,
+        description: pageData.description,
+        content: pageData.content,
+        props: {
+          ...pick(pageData, TEMPLATE_PAGE_PROPS),
+          tocDepth: pick(pageData.tocDepth, ['min', 'max'])
+        },
+        fromNavigate
+      })
+    },
+    /**
+     * Where the page at this path stands, if there is one this reader may see: `{ path, locale }`, or
+     * null.
+     *
+     * What a create link asks before opening the editor, so that following the same link twice opens
+     * the page the first visit made rather than a second one that would be refused on save. A page
+     * the reader may not see answers null like an absent one, and the link carries on to the editor
+     * -- where saving is refused as it always was, telling them nothing a 404 had not.
+     */
+    async pageExistsAt(path, locale) {
+      const siteStore = useSiteStore()
+      try {
+        const pageData = await API_CLIENT.get(`sites/${siteStore.id}/pages/${pagePathHash(path)}`, {
+          searchParams: { ...(locale && { locale }) }
+        }).json()
+        return pageData?.id ? { path: pageData.path, locale: pageData.locale } : null
+      } catch (err) {
+        if (err.response?.status === 404) {
+          return null
+        }
         throw err
       }
     },

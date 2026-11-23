@@ -13,8 +13,13 @@
     <!-- -> `py-1` on a phone: with the date gone the bar holds one line of small type, and 8px above and
             below it made a strip nearly as tall as the crumbs themselves -->
     <!-- -> Chrome, so in the interface's language and direction, as the header below it is -->
+    <!-- -> Put away entirely as the article is scrolled, and brought back for keyboard focus arriving
+            in it -- see `composables/collapsingChrome.js` -->
     <div
+      ref="breadcrumbBar"
       class="page-breadcrumbs py-1 px-4 sm:py-2 flex flex-wrap"
+      :class="{ 'chrome-collapsible': isChromeActive, 'is-collapsed': isChromeCollapsed }"
+      @focusin="expandChrome"
       :lang="commonStore.locale"
       :dir="siteStore.localeDir(commonStore.locale)"
       v-if="!editorStore.isActive && !pageStore.notFound">
@@ -55,9 +60,17 @@
         </div>
       </div>
     </div>
+    <!-- -> Shrunk rather than put away like the bars above it: it is what says which page this is.
+            How far is the tier's, in `_page-chrome.scss`. Same state, same file -->
     <page-header
       v-if="!pageStore.notFound"
-      :class="{ 'is-aligned': headerBounds !== null }"
+      :class="{
+        'is-aligned': headerBounds !== null,
+        'is-collapsible': isChromeActive,
+        'is-compact': isChromeActive && isChromeCollapsed
+      }"
+      :data-chrome-tier="chromeTier"
+      @focusin="expandChrome"
       :style="
         headerBounds !== null
           ? {
@@ -701,10 +714,16 @@ import { useI18n } from 'vue-i18n'
 import { useDark } from '@/composables/dark'
 import { dialog } from '@/composables/dialog'
 import { confirmDiscardUnsaved, useEditorBuffer } from '@/composables/editorBuffer'
+import {
+  exposeChromeHeight,
+  trackChromeScroll,
+  useCollapsingChrome
+} from '@/composables/collapsingChrome'
 import { useMeta } from '@/composables/meta'
 import { useMinWidth } from '@/composables/screen'
 import { usePageScripts } from '@/composables/pageScripts'
 import { notify } from '@/composables/notify'
+import { templateErrorMessage } from '@/helpers/pageTemplates'
 import { withViewTransition } from '@/composables/viewTransition'
 import { loading } from '@/composables/loading'
 import { pageProgress } from '@/composables/pageProgress'
@@ -1363,6 +1382,32 @@ const activeView = computed(() => {
 })
 
 /*
+  -> Collapsing chrome
+  The breadcrumbs and the page header giving way to the article as it is scrolled, along with the
+  layout's site header below desktop width -- `composables/collapsingChrome.js` has the why, the how,
+  and what goes at which size. Driven by the article column, which is what scrolls. Not in the editor,
+  which has a toolbar of its own to keep in view and no article column for this to follow.
+
+  Back out on every page and every switch of view: what was scrolled to is gone, and the reader arriving
+  at the top of something new should see what it is and where it sits.
+*/
+const {
+  tier: chromeTier,
+  isCollapsed: isChromeCollapsed,
+  expand: expandChrome
+} = useCollapsingChrome()
+const isChromeActive = computed(() => !editorStore.isActive)
+const breadcrumbBar = ref(null)
+
+trackChromeScroll(() => pageScroller.value?.$el)
+exposeChromeHeight(() => breadcrumbBar.value)
+
+watch(
+  () => [route.path, activeView.value, editorStore.isActive],
+  () => expandChrome()
+)
+
+/*
   An idea's discussion, drawn under its article: the Talk tab's conditions, with the idea in place of
   the tab. Nothing is offered to annotate it from -- an idea is discussed, not marked up -- and the
   server refuses annotations on one besides.
@@ -1695,24 +1740,7 @@ watch(
 
     // -> Enter Create Mode?
     if (newValue.startsWith('/_create')) {
-      if (!route.params.editor) {
-        notify({
-          type: 'negative',
-          message: 'No editor specified!'
-        })
-        return router.replace('/')
-      }
-      loading.show()
-      const pageCreateArgs = { editor: route.params.editor, fromNavigate: true }
-      if (route.query.path) {
-        pageCreateArgs.path = route.query.path
-      }
-      if (route.query.locale) {
-        pageCreateArgs.locale = route.query.locale
-      }
-      await pageStore.pageCreate(pageCreateArgs)
-      loading.hide()
-      return
+      return openCreateRoute()
     }
 
     /*
@@ -2166,6 +2194,71 @@ function onSidebarClick(ev) {
 /** Asks for the page's password. Opened on arrival, and again from the lock screen's own button. */
 function promptUnlock() {
   dialog({ component: PageUnlockDialog })
+}
+
+/**
+ * Opens the editor that a `/_create` URL asks for.
+ *
+ * `/_create/<editor>` starts a blank page in that editor. `?path`, `?locale` and `?title` fill those
+ * in, and `?template` starts the page from another one instead -- by id or by path, see
+ * `pageStore.pageFromTemplate` -- in which case the editor comes from the template and may be left
+ * out of the URL.
+ *
+ * A link naming a path that already has a page opens that page instead, which is what makes a
+ * create link something an outside tool can hand out once per item: the second visit finds what
+ * the first one saved.
+ *
+ * Every parameter is read only as a single string. A repeated one is an array, which no caller means
+ * and none of these could use.
+ */
+async function openCreateRoute() {
+  const query = (key) => (typeof route.query[key] === 'string' ? route.query[key] : undefined)
+  const editor = route.params.editor
+  const template = query('template')
+  const args = {
+    path: query('path'),
+    /*
+      Settled here rather than left to `pageCreate`, which falls back on the locale of whatever page
+      the store holds: the existing page and the template are looked up in the locale the new page
+      will be saved in, so the three cannot disagree. A link followed from a page keeps that page's
+      locale, as a New Page button does; one opened cold has no page in the store, whose locale is
+      then only its initial value, so it means the site's primary.
+    */
+    locale: query('locale') || (pageStore.id ? pageStore.locale : siteStore.locales.primary),
+    title: query('title')
+  }
+  if (!editor && !template) {
+    notify({
+      type: 'negative',
+      message: 'No editor specified!'
+    })
+    return router.replace('/')
+  }
+  loading.show()
+  try {
+    if (args.path) {
+      const existing = await pageStore.pageExistsAt(args.path, args.locale)
+      if (existing) {
+        notify({ type: 'info', message: t('editor.pageAlreadyExists') })
+        return router.replace(`${siteStore.localeUrlPrefix(existing.locale)}/${existing.path}`)
+      }
+    }
+    if (template) {
+      await pageStore.pageFromTemplate({ template, editor, ...args, fromNavigate: true })
+    } else {
+      await pageStore.pageCreate({ editor, ...args, fromNavigate: true })
+    }
+  } catch (err) {
+    editorStore.closeEditor()
+    notify({
+      type: 'negative',
+      message: template ? t('editor.template.failed') : t('editor.openFailed'),
+      caption: templateErrorMessage(err, t, editor)
+    })
+    router.replace('/')
+  } finally {
+    loading.hide()
+  }
 }
 
 /**

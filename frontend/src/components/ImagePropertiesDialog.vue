@@ -32,16 +32,12 @@
           hide-bottom-space
           spellcheck="false">
           <template #append>
-            <w-btn
-              flat
-              dense
-              round
+            <w-field-cap
               icon="mdi:folder-image"
-              color="primary"
               :aria-label="t('editor.markup.image.browse')"
               @click="browse">
               <w-tooltip>{{ t('editor.markup.image.browse') }}</w-tooltip>
-            </w-btn>
+            </w-field-cap>
           </template>
         </w-input>
 
@@ -85,8 +81,7 @@
           <div>
             <w-btn-toggle
               v-model="state.alignment"
-              push
-              glossy
+              depth
               no-caps
               toggle-color="primary"
               :aria-label="t('editor.markup.image.alignment')"

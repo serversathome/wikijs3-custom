@@ -13,6 +13,10 @@
             </template>
           </i18n-t>
         </div>
+        <div v-if="mayForce" class="mt-4">
+          <w-toggle v-model="state.force" :label="t(`admin.sites.deleteForce`)" />
+          <div class="text-caption mt-3">{{ t(`admin.sites.deleteForceHint`) }}</div>
+        </div>
         <div class="text-body2 mt-4">
           <strong class="text-negative">{{ t(`admin.sites.deleteConfirmWarn`) }}</strong>
         </div>
@@ -40,13 +44,14 @@
 
 <script setup>
 import { useI18n } from 'vue-i18n'
-import { apiFailureMessage } from '@/helpers/apiError'
+import { apiErrorMessage, apiFailureMessage } from '@/helpers/apiError'
 
 import { dialogComponentEmits, useDialogComponent } from '@/composables/dialog'
 import { notify } from '@/composables/notify'
-import { reactive } from 'vue'
+import { computed, reactive } from 'vue'
 
 import { useAdminStore } from '../stores/admin'
+import { useUserStore } from '../stores/user'
 
 // PROPS
 
@@ -68,6 +73,7 @@ const { dialogVisible, onDialogHide, onDialogOK, onDialogCancel } = useDialogCom
 // STORES
 
 const adminStore = useAdminStore()
+const userStore = useUserStore()
 
 // I18N
 
@@ -76,15 +82,23 @@ const { t, te } = useI18n()
 // DATA
 
 const state = reactive({
-  isLoading: false
+  isLoading: false,
+  force: false
 })
+
+// COMPUTED
+
+// -> Deleting a site's content along with it is refused by the API to anybody else
+const mayForce = computed(() => userStore.permissions.includes('manage:system'))
 
 // METHODS
 
 async function confirm() {
   state.isLoading = true
   try {
-    const resp = await API_CLIENT.delete(`sites/${props.site.id}`)
+    const resp = await API_CLIENT.delete(`sites/${props.site.id}`, {
+      searchParams: mayForce.value && state.force ? { force: true } : {}
+    })
     if (resp?.ok) {
       notify({
         type: 'positive',
@@ -107,7 +121,7 @@ async function confirm() {
   } catch (err) {
     notify({
       type: 'negative',
-      message: err.message
+      message: apiErrorMessage(err)
     })
   }
   state.isLoading = false

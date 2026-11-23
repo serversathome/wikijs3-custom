@@ -25,7 +25,6 @@
       <w-item-section>
         <w-input
           v-model="state.config.name"
-          outlined
           dense
           hide-bottom-space
           :aria-label="t(`profile.displayName`)"
@@ -42,7 +41,6 @@
       <w-item-section>
         <w-input
           v-model="state.config.email"
-          outlined
           dense
           :aria-label="t(`profile.email`)"
           readonly />
@@ -58,7 +56,6 @@
       <w-item-section>
         <w-input
           v-model="state.config.handle"
-          outlined
           dense
           hide-bottom-space
           prefix="@"
@@ -78,7 +75,6 @@
       <w-item-section>
         <w-input
           v-model="state.config.location"
-          outlined
           dense
           hide-bottom-space
           :aria-label="t(`profile.location`)"
@@ -95,7 +91,6 @@
       <w-item-section>
         <w-input
           v-model="state.config.jobTitle"
-          outlined
           dense
           hide-bottom-space
           :aria-label="t(`profile.jobTitle`)"
@@ -112,7 +107,6 @@
       <w-item-section>
         <w-input
           v-model="state.config.pronouns"
-          outlined
           dense
           hide-bottom-space
           :aria-label="t(`profile.pronouns`)"
@@ -134,7 +128,6 @@
         -->
         <w-select
           v-model="state.config.timezone"
-          outlined
           :options="timezones"
           dense
           options-dense
@@ -152,7 +145,6 @@
       <w-item-section>
         <w-select
           v-model="state.config.dateFormat"
-          outlined
           emit-value
           map-options
           dense
@@ -171,8 +163,7 @@
       <w-item-section side>
         <w-btn-toggle
           v-model="state.config.timeFormat"
-          push
-          glossy
+          depth
           no-caps
           toggle-color="primary"
           :options="timeFormats"
@@ -189,8 +180,7 @@
       <w-item-section side>
         <w-btn-toggle
           v-model="state.config.appearance"
-          push
-          glossy
+          depth
           no-caps
           toggle-color="primary"
           :options="appearances"
@@ -207,7 +197,6 @@
       <w-item-section>
         <w-select
           v-model="state.config.locale"
-          outlined
           emit-value
           map-options
           dense
@@ -218,6 +207,21 @@
       </w-item-section>
     </w-item>
     <div class="w-section-header mt-6">{{ t('profile.accessibility') }}</div>
+    <!-- -> A desktop's choice only: on a phone or a tablet the chrome always gives way, since there it is
+            a third of the screen -- see `composables/collapsingChrome.js` -->
+    <w-item tag="label">
+      <blueprint-icon icon="navigation-toolbar-top" />
+      <w-item-section>
+        <w-item-label>{{ t(`profile.collapseHeaderOnScroll`) }}</w-item-label>
+        <w-item-label caption>{{ t(`profile.collapseHeaderOnScrollHint`) }}</w-item-label>
+      </w-item-section>
+      <w-item-section avatar>
+        <w-toggle
+          v-model="state.config.collapseHeaderOnScroll"
+          :aria-label="t(`profile.collapseHeaderOnScroll`)" />
+      </w-item-section>
+    </w-item>
+    <w-separator inset spaced="sm" />
     <w-item>
       <blueprint-icon icon="visualy-impaired" />
       <w-item-section>
@@ -227,12 +231,28 @@
       <w-item-section side>
         <w-btn-toggle
           v-model="state.config.cvd"
-          push
-          glossy
+          depth
           no-caps
           toggle-color="primary"
           :options="cvdChoices"
           :aria-label="t(`profile.cvd`)" />
+      </w-item-section>
+    </w-item>
+    <w-separator inset spaced="sm" />
+    <w-item>
+      <blueprint-icon icon="typography" />
+      <w-item-section>
+        <w-item-label>{{ t(`profile.contentTextSize`) }}</w-item-label>
+        <w-item-label caption>{{ t(`profile.contentTextSizeHint`) }}</w-item-label>
+      </w-item-section>
+      <w-item-section side>
+        <w-btn-toggle
+          v-model="state.config.contentTextSize"
+          depth
+          no-caps
+          toggle-color="primary"
+          :options="contentTextSizes"
+          :aria-label="t(`profile.contentTextSize`)" />
       </w-item-section>
     </w-item>
     <w-separator inset spaced="sm" />
@@ -255,24 +275,6 @@
       </w-item-section>
       <w-item-section avatar>
         <w-toggle v-model="state.config.underlineLinks" :aria-label="t(`profile.underlineLinks`)" />
-      </w-item-section>
-    </w-item>
-    <w-separator inset spaced="sm" />
-    <w-item>
-      <blueprint-icon icon="typography" />
-      <w-item-section>
-        <w-item-label>{{ t(`profile.contentTextSize`) }}</w-item-label>
-        <w-item-label caption>{{ t(`profile.contentTextSizeHint`) }}</w-item-label>
-      </w-item-section>
-      <w-item-section side>
-        <w-btn-toggle
-          v-model="state.config.contentTextSize"
-          push
-          glossy
-          no-caps
-          toggle-color="primary"
-          :options="contentTextSizes"
-          :aria-label="t(`profile.contentTextSize`)" />
       </w-item-section>
     </w-item>
     <!-- -> Always: the preferences and accessibility settings below are savable whether or not the
@@ -338,6 +340,7 @@ const state = reactive({
     cvd: 'none',
     reduceMotion: false,
     underlineLinks: false,
+    collapseHeaderOnScroll: false,
     contentTextSize: 'default'
   },
   loading: 0
@@ -431,6 +434,7 @@ function applyProfile(profile) {
   state.config.cvd = profile.cvd || 'none'
   state.config.reduceMotion = profile.reduceMotion ?? false
   state.config.underlineLinks = profile.underlineLinks ?? false
+  state.config.collapseHeaderOnScroll = profile.collapseHeaderOnScroll ?? false
   state.config.contentTextSize = profile.contentTextSize || 'default'
 }
 
@@ -473,6 +477,7 @@ async function save() {
         cvd: state.config.cvd,
         reduceMotion: state.config.reduceMotion,
         underlineLinks: state.config.underlineLinks,
+        collapseHeaderOnScroll: state.config.collapseHeaderOnScroll,
         contentTextSize: state.config.contentTextSize
       }
     }).json()
@@ -494,6 +499,7 @@ async function save() {
       cvd: state.config.cvd,
       reduceMotion: state.config.reduceMotion,
       underlineLinks: state.config.underlineLinks,
+      collapseHeaderOnScroll: state.config.collapseHeaderOnScroll,
       contentTextSize: state.config.contentTextSize
     })
     notify({
